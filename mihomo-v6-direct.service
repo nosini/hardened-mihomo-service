@@ -1,0 +1,13 @@
+[Unit]
+Description=Track delegated IPv6 prefix for mihomo direct routing
+Wants=network-online.target
+After=network-online.target mihomo.service
+
+[Service]
+# Uplinks are detected from the default routes; list interfaces after the script to pin them.
+ExecStart=/usr/local/sbin/mihomo-v6-watch.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

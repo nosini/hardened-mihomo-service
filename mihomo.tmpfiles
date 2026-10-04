@@ -1,0 +1,7 @@
+# Paths mihomo.service binds writable into its sandbox. They have to exist before the
+# service starts: inside the sandbox /etc/mihomo is read-only, so mihomo can't create them.
+# config.yaml can hold proxy credentials, hence no access for others.
+d /etc/mihomo          0750 root   mihomo -
+d /etc/mihomo/ruleset  0750 mihomo mihomo -
+# An empty file is fine; mihomo initializes it on first open.
+f /etc/mihomo/cache.db 0600 mihomo mihomo -

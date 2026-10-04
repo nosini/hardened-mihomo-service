@@ -1,0 +1,83 @@
+# Example /etc/mihomo/config.yaml for mihomo.service. Replace the proxy with your own.
+#
+# Inside the sandbox mihomo can only write ruleset/, cache.db and geoip.metadb, so keep
+# every rule-provider and proxy-provider path under ./ruleset/.
+
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: info
+ipv6: true
+# Process-based routing; the SELinux policy and CAP_SYS_PTRACE exist for this.
+find-process-mode: always
+# Pick a port SELinux labels unreserved_port_t; the usual 9090 is websm_port_t.
+# external-controller: 127.0.0.1:9097
+
+profile:
+  store-selected: true
+  # Keeps fake-ip mappings across restarts; needs cache.db writable (it is by default).
+  store-fake-ip: true
+
+tun:
+  enable: true
+  # Must match oifname/iifname "Mihomo" in nftables-killswitch.conf.
+  device: Mihomo
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  dns-hijack:
+    - any:53
+    - tcp://any:53
+  # Destinations to route around the tunnel; add them to the kill switch's direct4/direct6
+  # sets too, or apps can't reach them.
+  # route-exclude-address:
+  #   - 192.168.1.0/24
+
+dns:
+  enable: true
+  ipv6: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  # Send DNS through the proxy like any other traffic.
+  respect-rules: true
+  # /etc/hosts and /etc/resolv.conf aren't visible in the sandbox, so neither the system
+  # hosts file nor a "system" nameserver can be used.
+  use-system-hosts: false
+  # Resolves proxy server names; these queries go out directly.
+  proxy-server-nameserver:
+    - https://1.1.1.1/dns-query
+  nameserver:
+    - https://1.1.1.1/dns-query
+
+proxies:
+  - name: example
+    type: ss
+    server: proxy.example.com
+    port: 8388
+    cipher: 2022-blake3-aes-128-gcm
+    password: "replace-me"
+
+proxy-groups:
+  - name: PROXY
+    type: select
+    proxies:
+      - example
+
+# rule-providers:
+#   example:
+#     type: http
+#     behavior: domain
+#     format: yaml
+#     url: https://example.com/rules.yaml
+#     path: ./ruleset/example.yaml
+#     interval: 86400
+
+rules:
+  - IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+  - IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+  - IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+  - IP-CIDR6,fc00::/7,DIRECT,no-resolve
+  # - RULE-SET,example,DIRECT
+  # GEOIP rules need /etc/mihomo/geoip.metadb, see README.md.
+  - MATCH,PROXY

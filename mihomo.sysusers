@@ -1,0 +1,3 @@
+# Account mihomo.service runs as. nftables-killswitch.conf matches its sockets by
+# name, so it has to exist before killswitch.service loads the ruleset.
+u mihomo - "mihomo proxy"

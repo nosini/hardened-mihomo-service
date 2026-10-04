@@ -1,0 +1,2 @@
+/usr/local/bin/mihomo    --    gen_context(system_u:object_r:mihomo_exec_t,s0)
+/etc/mihomo(/.*)?             gen_context(system_u:object_r:mihomo_conf_t,s0)

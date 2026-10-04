@@ -1,0 +1,14 @@
+[Unit]
+Description=mihomo kill switch
+After=firewalld.service
+Before=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /etc/nftables-killswitch.conf
+ExecStop=/usr/sbin/nft delete table inet killswitch
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

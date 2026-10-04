@@ -1,0 +1,3 @@
+# SELinux module build output (make -f /usr/share/selinux/devel/Makefile)
+/tmp/
+*.pp

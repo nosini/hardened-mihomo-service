@@ -1,0 +1,90 @@
+policy_module(mihomo, 1.2)
+
+type mihomo_t;
+type mihomo_exec_t;
+type mihomo_conf_t;
+
+init_daemon_domain(mihomo_t, mihomo_exec_t)
+files_type(mihomo_conf_t)
+
+domain_getattr_all_domains(mihomo_t)
+
+gen_require(`
+    type cgroup_t;
+    type dns_port_t;
+    type http_port_t;
+    type init_t;
+    type iptables_exec_t;
+    type node_t;
+    type proc_net_t;
+    type kernel_t;
+    type proc_t;
+    type sysctl_net_t;
+    type tun_tap_device_t;
+    type unreserved_port_t;
+')
+
+allow mihomo_t self:capability { dac_read_search net_admin net_bind_service sys_ptrace };
+# Required for process-based routing (find-process-mode: always): the per-connection
+# process lookup is a ptrace-style access evaluated as a namespaced capability.
+allow mihomo_t self:cap_userns sys_ptrace;
+
+allow mihomo_t self:tcp_socket { accept bind connect create getattr getopt listen read setopt shutdown write };
+allow mihomo_t self:udp_socket { bind connect create getattr ioctl read setopt write };
+allow mihomo_t self:tun_socket create;
+allow mihomo_t self:netlink_route_socket { bind create getattr nlmsg_read nlmsg_write read setopt write };
+allow mihomo_t self:netlink_netfilter_socket { bind create getattr getopt read write };
+allow mihomo_t self:netlink_tcpdiag_socket { bind create getattr getopt nlmsg_read read write };
+
+allow mihomo_t node_t:tcp_socket node_bind;
+allow mihomo_t node_t:udp_socket node_bind;
+allow mihomo_t dns_port_t:tcp_socket name_bind;
+allow mihomo_t dns_port_t:udp_socket name_bind;
+# mihomo is a proxy/router: DIRECT outbounds dial arbitrary destination ports (ssh:22,
+# smtp, game servers, ...). Restricting destination ports isn't meaningful here and just
+# breaks traffic, so allow TCP connect to all ports.
+corenet_tcp_connect_all_ports(mihomo_t)
+
+# mihomo binds listeners (mixed-port, external-controller) and ephemeral source ports for
+# outbound dials across the unreserved range; removing either line breaks outbound dials.
+allow mihomo_t unreserved_port_t:tcp_socket name_bind;
+allow mihomo_t unreserved_port_t:udp_socket name_bind;
+
+allow mihomo_t tun_tap_device_t:chr_file { getattr ioctl open read write };
+allow mihomo_t iptables_exec_t:file { execute execute_no_trans getattr open read };
+
+allow mihomo_t mihomo_conf_t:dir { getattr read search watch };
+allow mihomo_t mihomo_conf_t:file { create getattr lock open read rename setattr unlink write };
+
+# CA bundles and the symlinks that point into them
+miscfiles_read_generic_certs(mihomo_t)
+# os/exec points a child's unused stdio at /dev/null
+dev_rw_null(mihomo_t)
+
+allow mihomo_t proc_t:dir read;
+allow mihomo_t proc_t:file { getattr open read };
+allow mihomo_t cgroup_t:dir search;
+allow mihomo_t sysctl_net_t:dir search;
+allow mihomo_t sysctl_net_t:file { open read };
+allow mihomo_t init_t:dir read;
+allow mihomo_t init_t:lnk_file read;
+
+allow mihomo_t proc_net_t:file { getattr open read };
+allow mihomo_t proc_net_t:dir { getattr open read search };
+
+allow mihomo_t domain:dir search;
+allow mihomo_t domain:lnk_file read;
+
+kernel_read_network_state(mihomo_t)
+kernel_read_system_state(mihomo_t)
+domain_read_all_domains_state(mihomo_t)
+domain_ptrace_all_domains(mihomo_t)
+
+# Block environ access without spamming logs
+dontaudit mihomo_t domain:file { read write append };
+
+# Kernel module loading for nftables expressions and TUN device
+allow mihomo_t kernel_t:system module_request;
+
+# Rule-provider updates write a temp file in the dir and rename it over the target
+allow mihomo_t mihomo_conf_t:dir { add_name remove_name write };
