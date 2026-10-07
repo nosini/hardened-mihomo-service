@@ -15,6 +15,9 @@ with an nftables kill switch and an SELinux policy.
 - `mihomo-v6-direct.service` and its two scripts are optional. They add source-based routing
   rules so that mihomo's direct IPv6 connections from the uplink's own prefixes use the main
   routing table instead of looping back into the TUN. The rules follow prefix changes.
+  With several uplinks, each one's prefixes are routed through a table holding only that
+  uplink's routes, so replies that arrive on a secondary uplink, such as a VLAN, pass a
+  strict reverse-path filter like firewalld's `IPv6_rpfilter=strict`.
 
 ## Installing
 
@@ -86,4 +89,6 @@ sudo systemctl enable --now mihomo-v6-direct.service
 ```
 
 The uplinks are the interfaces that hold a default route. To fix them instead, add the
-interface names to `ExecStart=` in `mihomo-v6-direct.service`.
+interface names to `ExecStart=` in `mihomo-v6-direct.service`. Each uplink's routing table
+is numbered 8999000 plus its interface index, and its rules come at priorities 8998 and
+8999, ahead of mihomo's at 9000.
