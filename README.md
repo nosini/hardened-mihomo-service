@@ -6,11 +6,12 @@ with an nftables kill switch and an SELinux policy.
 - `mihomo.service` runs mihomo as an unprivileged `mihomo` user in an empty, read-only root.
   Only `/usr`, the trust stores and `/etc/mihomo` are visible. Of those, only `ruleset/`,
   `cache.db` and `geoip.metadb` are writable. `/etc/hosts` and `/etc/resolv.conf` are not,
-  so configure mihomo's DNS servers explicitly.
+  so configure mihomo's DNS servers explicitly. Process lookup is the exception; see
+  [Process lookup](#process-lookup).
 - `killswitch.service` loads `nftables-killswitch.conf` before the network comes up. It
   drops anything that doesn't go through the TUN device, except mihomo's own sockets and
   the local addresses you allow in `/etc/nftables-killswitch.d/`. If mihomo stops, nothing
-  leaks.
+  leaks. If the rules fail to load, everything but loopback stays blocked.
 - `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`.
 - `mihomo-v6-direct.service` and its two scripts are optional. They add source-based routing
   rules so that mihomo's direct IPv6 connections from the uplink's own prefixes use the main
@@ -53,6 +54,7 @@ sudo curl -fLo /etc/mihomo/geoip.metadb \
     https://github.com/MetaCubeX/meta-rules-dat/releases/download/latest/geoip.metadb
 sudo chown mihomo:mihomo /etc/mihomo/geoip.metadb
 sudo chmod 600 /etc/mihomo/geoip.metadb
+sudo restorecon -v /etc/mihomo/geoip.metadb
 ```
 
 Put your LAN and any other addresses apps should reach directly in a file under
@@ -80,6 +82,12 @@ sudo systemctl enable --now killswitch.service mihomo.service
 The kill switch blocks all traffic outside the tunnel as soon as it loads. Make sure mihomo
 connects before enabling it on a remote machine.
 
+After changing a file in `/etc/nftables-killswitch.d/`, swap the rules with
+`sudo systemctl reload killswitch.service`. If the rules don't load, at boot or on a
+reload, the previous table stays in place. At boot that's a table that blocks everything
+but loopback, so the machine stays offline. `journalctl -u killswitch.service` shows the
+error. To get online without the kill switch, run `sudo nft delete table inet killswitch`.
+
 For the IPv6 direct routing:
 
 ```sh
@@ -92,3 +100,42 @@ The uplinks are the interfaces that hold a default route. To fix them instead, a
 interface names to `ExecStart=` in `mihomo-v6-direct.service`. Each uplink gets a routing
 table, numbered 8999000 plus its interface index, holding that copy. The rules come at
 priorities 8998 and 8999, ahead of mihomo's at 9000.
+
+## Process lookup
+
+`find-process-mode: always` lets rules match the process behind a connection
+(`PROCESS-NAME`, `PROCESS-PATH`). mihomo finds it by reading the `fd` and `exe` links under
+`/proc/<pid>/` of other users' processes, which takes `CAP_SYS_PTRACE` and
+`CAP_DAC_READ_SEARCH`. The SELinux policy keeps it from opening those processes' files, so
+it can't read their environment, command line or memory. It can't stop mihomo from
+following their `root` and `cwd` links, though, which work the same way as `exe`. Through
+them a compromised mihomo can reach files outside its sandbox, as far as `mihomo_t` may
+read them.
+
+If you don't use these rules, turn the lookup off: set `find-process-mode: off` in
+`config.yaml`, turn off the SELinux boolean, and drop the two capabilities:
+
+```sh
+sudo setsebool -P mihomo_find_process off
+sudo mkdir -p /etc/systemd/system/mihomo.service.d
+printf '%s\n' '[Service]' \
+    'CapabilityBoundingSet=' 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE' \
+    'AmbientCapabilities=' 'AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE' |
+    sudo tee /etc/systemd/system/mihomo.service.d/no-process-lookup.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mihomo.service
+```
+
+## Updating
+
+Rebuild and load the SELinux module, relabel `/etc/mihomo` (version 1.3 gave mihomo's
+writable files a type of their own), then install the files again as above and reload:
+
+```sh
+make -f /usr/share/selinux/devel/Makefile mihomo.pp
+sudo semodule -i mihomo.pp
+sudo restorecon -Rv /etc/mihomo
+sudo systemctl daemon-reload
+sudo systemctl reload killswitch.service
+sudo systemctl restart mihomo.service mihomo-v6-direct.service
+```

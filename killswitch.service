@@ -6,7 +6,16 @@ Wants=network-pre.target
 
 [Service]
 Type=oneshot
+# Block everything but loopback first. The full ruleset replaces this table in the same
+# transaction, so if it fails to load (a mistake in a drop-in, the mihomo user missing),
+# the machine stays offline instead of starting its network without a kill switch.
+ExecStartPre=/usr/sbin/nft 'add table inet killswitch; delete table inet killswitch; \
+    table inet killswitch { \
+        chain output { type filter hook output priority -100; policy drop; oifname "lo" accept; }; \
+        chain input { type filter hook input priority -100; policy drop; iifname "lo" accept; }; }'
 ExecStart=/usr/sbin/nft -f /etc/nftables-killswitch.conf
+# Swaps the rules without a moment where none are loaded
+ExecReload=/usr/sbin/nft -f /etc/nftables-killswitch.conf
 ExecStop=/usr/sbin/nft delete table inet killswitch
 RemainAfterExit=yes
 

@@ -3,12 +3,14 @@
 # Inside the sandbox mihomo can only write ruleset/, cache.db and geoip.metadb, so keep
 # every rule-provider and proxy-provider path under ./ruleset/.
 
-mixed-port: 7890
+# Pick a port SELinux labels unreserved_port_t; the usual 7890 is conman_port_t.
+mixed-port: 7891
 allow-lan: false
 mode: rule
 log-level: info
 ipv6: true
-# Process-based routing; the SELinux policy and CAP_SYS_PTRACE exist for this.
+# Process-based routing (PROCESS-NAME, PROCESS-PATH rules). If you don't use it, set this to
+# off and take mihomo's access to other processes away too; see README.md.
 find-process-mode: always
 # Pick a port SELinux labels unreserved_port_t; the usual 9090 is websm_port_t.
 # external-controller: 127.0.0.1:9097

@@ -1,11 +1,23 @@
-policy_module(mihomo, 1.2)
+policy_module(mihomo, 1.3)
 
 type mihomo_t;
 type mihomo_exec_t;
+# /etc/mihomo, read-only
 type mihomo_conf_t;
+# What mihomo writes in it: ruleset/, cache.db and geoip.metadb
+type mihomo_data_t;
 
 init_daemon_domain(mihomo_t, mihomo_exec_t)
 files_type(mihomo_conf_t)
+files_type(mihomo_data_t)
+
+## <desc>
+## <p>
+## Allow mihomo to find out which process owns a connection, for PROCESS-NAME and
+## PROCESS-PATH rules (find-process-mode). Turn this off if you don't use them.
+## </p>
+## </desc>
+gen_tunable(mihomo_find_process, true)
 
 domain_getattr_all_domains(mihomo_t)
 
@@ -24,10 +36,7 @@ gen_require(`
     type unreserved_port_t;
 ')
 
-allow mihomo_t self:capability { dac_read_search net_admin net_bind_service sys_ptrace };
-# Required for process-based routing (find-process-mode: always): the per-connection
-# process lookup is a ptrace-style access evaluated as a namespaced capability.
-allow mihomo_t self:cap_userns sys_ptrace;
+allow mihomo_t self:capability { net_admin net_bind_service };
 
 allow mihomo_t self:tcp_socket { accept bind connect create getattr getopt listen read setopt shutdown write };
 allow mihomo_t self:udp_socket { bind connect create getattr ioctl read setopt write };
@@ -53,8 +62,11 @@ allow mihomo_t unreserved_port_t:udp_socket name_bind;
 allow mihomo_t tun_tap_device_t:chr_file { getattr ioctl open read write };
 allow mihomo_t iptables_exec_t:file { execute execute_no_trans getattr open read };
 
-allow mihomo_t mihomo_conf_t:dir { getattr read search watch };
-allow mihomo_t mihomo_conf_t:file { create getattr lock open read rename setattr unlink write };
+allow mihomo_t mihomo_conf_t:dir { list_dir_perms watch };
+allow mihomo_t mihomo_conf_t:file read_file_perms;
+# Providers write their files with os.WriteFile and create missing parent directories
+manage_dirs_pattern(mihomo_t, mihomo_data_t, mihomo_data_t)
+manage_files_pattern(mihomo_t, mihomo_data_t, mihomo_data_t)
 
 # CA bundles and the symlinks that point into them
 miscfiles_read_generic_certs(mihomo_t)
@@ -72,19 +84,26 @@ allow mihomo_t init_t:lnk_file read;
 allow mihomo_t proc_net_t:file { getattr open read };
 allow mihomo_t proc_net_t:dir { getattr open read search };
 
-allow mihomo_t domain:dir search;
-allow mihomo_t domain:lnk_file read;
-
 kernel_read_network_state(mihomo_t)
 kernel_read_system_state(mihomo_t)
-domain_read_all_domains_state(mihomo_t)
-domain_ptrace_all_domains(mihomo_t)
 
-# Block environ access without spamming logs
-dontaudit mihomo_t domain:file { read write append };
+# Process lookup finds the socket's inode through netlink, then searches the fd links
+# under /proc/<pid>/fd of the processes with the socket's UID and reads the owner's exe
+# link. Those links belong to other users, so it needs CAP_DAC_READ_SEARCH to list
+# them and CAP_SYS_PTRACE to read them. The kernel checks reading them as a read-only
+# ptrace access, which SELinux grants through file read on the process's domain.
+# Without open on those files and without the ptrace permission, mihomo can't open other
+# processes' environ, cmdline or mem.
+# What this can't take away: /proc/<pid>/root and cwd are links of the same kind as exe,
+# so a compromised mihomo can reach files outside its sandbox through them. Its own type
+# enforcement still decides which of those files it can read.
+tunable_policy(`mihomo_find_process',`
+    allow mihomo_t self:capability { dac_read_search sys_ptrace };
+    allow mihomo_t self:cap_userns sys_ptrace;
+    allow mihomo_t domain:dir { getattr open read search };
+    allow mihomo_t domain:lnk_file { getattr read };
+    allow mihomo_t domain:file read;
+')
 
 # Kernel module loading for nftables expressions and TUN device
 allow mihomo_t kernel_t:system module_request;
-
-# Rule-provider updates write a temp file in the dir and rename it over the target
-allow mihomo_t mihomo_conf_t:dir { add_name remove_name write };
