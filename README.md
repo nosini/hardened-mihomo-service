@@ -6,15 +6,16 @@ with an nftables kill switch and an SELinux policy.
 - `mihomo.service` runs mihomo as an unprivileged `mihomo` user in an empty, read-only root.
   Only `/usr`, the trust stores and `/etc/mihomo` are visible. Of those, only `ruleset/`,
   `cache.db` and `geoip.metadb` are writable. `/etc/hosts` and `/etc/resolv.conf` are not,
-  so configure mihomo's DNS servers explicitly. Process lookup is the exception; see
-  [Process lookup](#process-lookup).
+  so configure mihomo's DNS servers explicitly. mihomo can't see other processes either;
+  it learns which process owns a connection from mihomo-sockowner.
 - `killswitch.service` loads `nftables-killswitch.conf` before the network comes up. It
   drops anything that doesn't go through the TUN device, except mihomo's own sockets and
   the local addresses you allow in `/etc/nftables-killswitch.d/`. If mihomo stops, nothing
   leaks. If the rules fail to load, everything but loopback stays blocked.
-- `mihomo-sockowner.service` is optional. It attaches small BPF programs that record which
-  process opened each connection, so `PROCESS-NAME` and `PROCESS-PATH` rules work more
-  reliably; see [Process lookup](#process-lookup).
+- `mihomo-sockowner.service` attaches small BPF programs that record which process opened
+  each connection and which program each process runs, for `PROCESS-NAME` and
+  `PROCESS-PATH` rules. It needs the kernel's BPF LSM; see
+  [Process lookup](#process-lookup).
 - `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`, and
   mihomo-sockowner to `mihomo_sockowner_t`.
 - `mihomo-v6-direct.service` and its two scripts are optional. They add source-based routing
@@ -83,6 +84,9 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now killswitch.service mihomo.service
 ```
 
+For `PROCESS-NAME` and `PROCESS-PATH` rules, also install mihomo-sockowner as described
+in [Process lookup](#process-lookup).
+
 The kill switch blocks all traffic outside the tunnel as soon as it loads. Make sure mihomo
 connects before enabling it on a remote machine.
 
@@ -109,21 +113,35 @@ priorities 8998 and 8999, ahead of mihomo's at 9000.
 ## Process lookup
 
 `find-process-mode: always` lets rules match the process behind a connection
-(`PROCESS-NAME`, `PROCESS-PATH`). mihomo can find that process in two ways.
+(`PROCESS-NAME`, `PROCESS-PATH`). mihomo.service gives mihomo no access to other
+processes, so it gets that information from mihomo-sockowner.
 
 ### With mihomo-sockowner
 
-`mihomo-sockowner.service` attaches BPF programs to the root cgroup. When a program opens a
-TCP or UDP connection, they note its process ID in a table that mihomo reads. The table
-keeps the entry after the connection closes, so a short UDP exchange still matches its
-rule. Looking a connection up takes microseconds instead of a search through `/proc`. When
-a process passes a socket to another, the table names the process that used it.
+`mihomo-sockowner.service` attaches BPF programs that record the process behind each TCP
+and UDP connection and the program each process runs. mihomo reads both from tables that
+`mihomo.service` binds into its sandbox read-only; it never looks at `/proc`. The tables
+keep an entry after its connection closes and after its process exits, so a short UDP
+exchange still matches its rule. Looking a connection up takes microseconds. When a
+process passes a socket to another, the tables name the process that used it.
 
-The loader needs `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_CHOWN`, and only while it attaches the
-programs; it exits afterwards and the programs stay attached. It doesn't need
-`CAP_PERFMON`, so the programs can't read kernel memory. mihomo itself gets no extra
-capabilities: `mihomo.service` binds the table into its sandbox read-only and allows the
-`bpf` system call it reads it with. This setup has been tested on Linux 7.2.
+This needs the BPF LSM, which most distribution kernels build in but not all turn on.
+Check that `bpf` is in the list of active LSMs:
+
+```sh
+cat /sys/kernel/security/lsm
+```
+
+If it's missing, look processes up [through /proc](#through-proc) instead. This setup has
+been tested on Linux 7.2.
+
+The loader needs `CAP_BPF`, `CAP_PERFMON`, `CAP_NET_ADMIN` and `CAP_CHOWN`, and only while
+it attaches the programs; it exits afterwards and the programs stay attached.
+`CAP_PERFMON` lets BPF programs read kernel memory, which recording what each process runs
+requires. The programs are built into the loader and checked by the kernel when they're
+loaded, and the loader has no network access and takes no input but its command line. In
+return, mihomo, which handles network traffic and serves its API, needs no capabilities
+and no access to other processes for this.
 
 mihomo-sockowner is built from mihomo's source, next to mihomo itself, and needs Go 1.25 or
 later. In a mihomo checkout that has `component/process/ebpf`:
@@ -135,7 +153,7 @@ sudo install -m 755 mihomo-sockowner /usr/local/bin/mihomo-sockowner
 sudo restorecon -v /usr/local/bin/mihomo-sockowner
 ```
 
-Then install and enable the unit. It starts before mihomo whenever mihomo starts:
+Then install and enable the unit:
 
 ```sh
 sudo install -m 644 mihomo-sockowner.service /etc/systemd/system/
@@ -144,41 +162,74 @@ sudo systemctl enable --now mihomo-sockowner.service
 sudo systemctl restart mihomo.service
 ```
 
-`config.example.yaml` already points `find-process-bpf-map` at the table. When mihomo opens
-it, `sudo journalctl -u mihomo.service` shows "Using socket owners recorded in
-/run/mihomo-bpf/conn_owners".
+Once enabled, mihomo requires it. Otherwise process rules would silently stop matching
+whenever the programs aren't attached. If they fail to attach, mihomo doesn't start, and
+`sudo journalctl -u mihomo-sockowner.service` shows why. Restarting or stopping
+mihomo-sockowner restarts or stops mihomo too.
 
-mihomo still reads the `exe` link of the owning process to get its path, so it keeps the
-access described next. Connections the table doesn't know, such as those of programs that
-opened them before mihomo-sockowner started, are looked up that way too.
+`config.example.yaml` already points `find-process-bpf-map` at the tables and sets
+`find-process-bpf-only: true`. When mihomo opens them, `sudo journalctl -u mihomo.service`
+shows "Using socket owners and executables recorded in /run/mihomo-bpf".
+
+Some processes can't be named:
+
+- Connections opened before mihomo-sockowner started. Processes that were already running
+  are filled in when it starts, but their earlier connections aren't.
+- Programs whose path is longer than 1024 bytes.
+- A process in a plain `chroot` is named by its path inside the chroot. Containers and
+  sandboxes such as Flatpak show their in-sandbox path, as they do in `/proc`.
 
 ### Through /proc
 
-Without mihomo-sockowner, mihomo finds the process by reading the `fd` and `exe` links
-under `/proc/<pid>/` of other users' processes, which takes `CAP_SYS_PTRACE` and
-`CAP_DAC_READ_SEARCH`. This only works while the connection is still open. The SELinux
-policy keeps mihomo from opening those processes' files, so it can't read their
-environment, command line or memory. It can't stop mihomo from following their `root` and
-`cwd` links, though, which work the same way as `exe`. Through them a compromised mihomo
-can reach files outside its sandbox, as far as `mihomo_t` may read them.
+Without the BPF LSM, mihomo can find the process by reading the `fd` and `exe` links under
+`/proc/<pid>/` of other users' processes. That takes `CAP_SYS_PTRACE` and
+`CAP_DAC_READ_SEARCH` and only works while the connection is still open. The SELinux policy
+keeps mihomo from opening those processes' files, so it can't read their environment,
+command line or memory. It can't stop mihomo from following their `root` and `cwd` links,
+though, which work the same way as `exe`. Through them a compromised mihomo can reach files
+outside its sandbox, as far as `mihomo_t` may read them.
+
+To use it, set `find-process-bpf-only: false` in `config.yaml`, then turn on the SELinux
+boolean and give mihomo the two capabilities:
+
+```sh
+sudo setsebool -P mihomo_find_process_proc on
+sudo mkdir -p /etc/systemd/system/mihomo.service.d
+printf '%s\n' '[Service]' \
+    'CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH' \
+    'AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH' |
+    sudo tee /etc/systemd/system/mihomo.service.d/proc-lookup.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mihomo.service
+```
+
+mihomo-sockowner can still record which process owns each connection, without the
+programs that need the BPF LSM. That keeps short UDP exchanges matching their rules while
+the process runs; mihomo then reads the path from `/proc`. Install it as above and run it
+without `-exec-paths`:
+
+```sh
+sudo mkdir -p /etc/systemd/system/mihomo-sockowner.service.d
+printf '%s\n' '[Service]' 'ExecStart=' \
+    'ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo attach' |
+    sudo tee /etc/systemd/system/mihomo-sockowner.service.d/no-exec-paths.conf
+sudo systemctl daemon-reload
+sudo systemctl restart mihomo-sockowner.service
+```
 
 ### Turning it off
 
-If you don't use these rules, turn the lookup off: set `find-process-mode: off` in
-`config.yaml`, turn off the SELinux boolean, disable mihomo-sockowner if you installed it,
-and drop the two capabilities:
+If you don't use these rules, set `find-process-mode: off` in `config.yaml`, turn off the
+SELinux boolean and disable mihomo-sockowner:
 
 ```sh
 sudo setsebool -P mihomo_find_process off
 sudo systemctl disable --now mihomo-sockowner.service
-sudo mkdir -p /etc/systemd/system/mihomo.service.d
-printf '%s\n' '[Service]' \
-    'CapabilityBoundingSet=' 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE' \
-    'AmbientCapabilities=' 'AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE' |
-    sudo tee /etc/systemd/system/mihomo.service.d/no-process-lookup.conf
-sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
+
+If you looked processes up through `/proc`, also turn off `mihomo_find_process_proc` and
+remove `/etc/systemd/system/mihomo.service.d/proc-lookup.conf`.
 
 ## Updating
 
@@ -195,6 +246,19 @@ sudo systemctl daemon-reload
 sudo systemctl reload killswitch.service
 sudo systemctl restart mihomo.service mihomo-v6-direct.service
 ```
+
+Version 1.6 records what each process runs in mihomo-sockowner, so mihomo no longer reads
+`/proc`. When updating to it, rebuild and install mihomo-sockowner too, add
+`find-process-bpf-only: true` to `config.yaml` after `find-process-bpf-map`, and enable the
+unit again so that mihomo requires it instead of merely wanting it:
+
+```sh
+sudo systemctl reenable mihomo-sockowner.service
+sudo systemctl restart mihomo-sockowner.service
+```
+
+Without the BPF LSM, follow [Through /proc](#through-proc) instead; the policy now keeps
+that access behind `mihomo_find_process_proc`.
 
 If `restorecon` doesn't relabel `ruleset/` to `mihomo_data_t`, check
 `sudo semanage fcontext -l -C` for local rules on `/etc/mihomo` and remove them with

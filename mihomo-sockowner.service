@@ -1,19 +1,23 @@
 [Unit]
 Description=Record the process behind each connection for mihomo
-# mihomo binds the map directory into its sandbox when it starts, so attach first. The
-# directory stays when this stops or restarts, and mihomo picks up the new map.
+# mihomo binds the maps directory into its sandbox when it starts, so attach first. The
+# directory stays when this stops or restarts, and mihomo picks up the new maps.
 Before=mihomo.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo attach
+ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo -exec-paths attach
 ExecStop=/usr/local/bin/mihomo-sockowner detach
 
 # Loading and attaching cgroup BPF programs takes CAP_BPF and CAP_NET_ADMIN; CAP_CHOWN
-# gives the map to the mihomo group. The programs avoid helpers that need CAP_PERFMON,
-# which would let BPF programs read kernel memory.
-CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_CHOWN
+# gives the maps to the mihomo group. -exec-paths also records each process's executable,
+# so that mihomo needn't read other processes' /proc entries. Those programs are LSM
+# programs that read kernel structures, which takes CAP_PERFMON and lets them read
+# kernel memory. They are fixed and checked by the kernel's verifier, and the loader
+# exits once they are attached. Without -exec-paths, drop CAP_PERFMON and see "Process
+# lookup" in README.md.
+CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN
 NoNewPrivileges=yes
 SystemCallFilter=@system-service bpf
 SystemCallArchitectures=native
@@ -43,5 +47,9 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
+# Enabling this makes mihomo require it: with find-process-bpf-only, mihomo can't name
+# processes without these maps, so PROCESS-NAME and PROCESS-PATH rules would silently stop
+# matching. If attaching fails, mihomo doesn't start; stopping or restarting this stops or
+# restarts mihomo too.
 [Install]
-WantedBy=mihomo.service
+RequiredBy=mihomo.service
