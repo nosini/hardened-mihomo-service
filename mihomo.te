@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.3)
+policy_module(mihomo, 1.4)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -76,6 +76,10 @@ dev_rw_null(mihomo_t)
 allow mihomo_t proc_t:dir read;
 allow mihomo_t proc_t:file { getattr open read };
 allow mihomo_t cgroup_t:dir search;
+# The Go runtime reads cpu.max to size GOMAXPROCS; without a CPU quota it falls back to
+# the CPU count. If mihomo.service ever sets CPUQuota=, use fs_read_cgroup_files(mihomo_t)
+# instead, so Go reads the limit.
+dontaudit mihomo_t cgroup_t:file { open read };
 allow mihomo_t sysctl_net_t:dir search;
 allow mihomo_t sysctl_net_t:file { open read };
 allow mihomo_t init_t:dir read;

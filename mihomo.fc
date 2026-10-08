@@ -1,4 +1,4 @@
-/usr/local/bin/mihomo    --    gen_context(system_u:object_r:mihomo_exec_t,s0)
+/usr/bin/mihomo          --    gen_context(system_u:object_r:mihomo_exec_t,s0)
 /etc/mihomo(/.*)?             gen_context(system_u:object_r:mihomo_conf_t,s0)
 /etc/mihomo/ruleset(/.*)?     gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/cache\.db    --   gen_context(system_u:object_r:mihomo_data_t,s0)

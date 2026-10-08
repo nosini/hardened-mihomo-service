@@ -1,7 +1,9 @@
 # Example /etc/mihomo/config.yaml for mihomo.service. Replace the proxy with your own.
 #
 # Inside the sandbox mihomo can only write ruleset/, cache.db and geoip.metadb, so keep
-# every rule-provider and proxy-provider path under ./ruleset/.
+# every http rule-provider and proxy-provider path under ./ruleset/. Lists you maintain
+# yourself (type: file) can go elsewhere in /etc/mihomo, e.g. ./rules/, owned by root
+# and readable by the mihomo group, so mihomo can't change them.
 
 # Pick a port SELinux labels unreserved_port_t; the usual 7890 is conman_port_t.
 mixed-port: 7891

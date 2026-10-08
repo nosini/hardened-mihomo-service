@@ -139,3 +139,7 @@ sudo systemctl daemon-reload
 sudo systemctl reload killswitch.service
 sudo systemctl restart mihomo.service mihomo-v6-direct.service
 ```
+
+If `restorecon` doesn't relabel `ruleset/` to `mihomo_data_t`, check
+`sudo semanage fcontext -l -C` for local rules on `/etc/mihomo` and remove them with
+`sudo semanage fcontext -d`; local rules override the module's.
