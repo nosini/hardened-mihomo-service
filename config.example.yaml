@@ -14,6 +14,9 @@ ipv6: true
 # Process-based routing (PROCESS-NAME, PROCESS-PATH rules). If you don't use it, set this to
 # off and take mihomo's access to other processes away too; see README.md.
 find-process-mode: always
+# Where mihomo.service shows it the map of mihomo-sockowner.service. Without that service,
+# mihomo falls back to searching /proc.
+find-process-bpf-map: /run/mihomo-bpf/conn_owners
 # Pick a port SELinux labels unreserved_port_t; the usual 9090 is websm_port_t.
 # external-controller: 127.0.0.1:9097
 

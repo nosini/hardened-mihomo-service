@@ -12,7 +12,11 @@ with an nftables kill switch and an SELinux policy.
   drops anything that doesn't go through the TUN device, except mihomo's own sockets and
   the local addresses you allow in `/etc/nftables-killswitch.d/`. If mihomo stops, nothing
   leaks. If the rules fail to load, everything but loopback stays blocked.
-- `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`.
+- `mihomo-sockowner.service` is optional. It attaches small BPF programs that record which
+  process opened each connection, so `PROCESS-NAME` and `PROCESS-PATH` rules work more
+  reliably; see [Process lookup](#process-lookup).
+- `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`, and
+  mihomo-sockowner to `mihomo_sockowner_t`.
 - `mihomo-v6-direct.service` and its two scripts are optional. They add source-based routing
   rules so that mihomo's direct IPv6 connections from the uplink's own prefixes use the main
   routing table instead of looping back into the TUN. The rules follow prefix changes.
@@ -85,8 +89,9 @@ connects before enabling it on a remote machine.
 After changing a file in `/etc/nftables-killswitch.d/`, swap the rules with
 `sudo systemctl reload killswitch.service`. If the rules don't load, at boot or on a
 reload, the previous table stays in place. At boot that's a table that blocks everything
-but loopback, so the machine stays offline. `journalctl -u killswitch.service` shows the
-error. To get online without the kill switch, run `sudo nft delete table inet killswitch`.
+but loopback, so the machine stays offline. `sudo journalctl -u killswitch.service` shows
+the error. To get online without the kill switch, run
+`sudo nft delete table inet killswitch`.
 
 For the IPv6 direct routing:
 
@@ -104,19 +109,68 @@ priorities 8998 and 8999, ahead of mihomo's at 9000.
 ## Process lookup
 
 `find-process-mode: always` lets rules match the process behind a connection
-(`PROCESS-NAME`, `PROCESS-PATH`). mihomo finds it by reading the `fd` and `exe` links under
-`/proc/<pid>/` of other users' processes, which takes `CAP_SYS_PTRACE` and
-`CAP_DAC_READ_SEARCH`. The SELinux policy keeps it from opening those processes' files, so
-it can't read their environment, command line or memory. It can't stop mihomo from
-following their `root` and `cwd` links, though, which work the same way as `exe`. Through
-them a compromised mihomo can reach files outside its sandbox, as far as `mihomo_t` may
-read them.
+(`PROCESS-NAME`, `PROCESS-PATH`). mihomo can find that process in two ways.
+
+### With mihomo-sockowner
+
+`mihomo-sockowner.service` attaches BPF programs to the root cgroup. When a program opens a
+TCP or UDP connection, they note its process ID in a table that mihomo reads. The table
+keeps the entry after the connection closes, so a short UDP exchange still matches its
+rule. Looking a connection up takes microseconds instead of a search through `/proc`. When
+a process passes a socket to another, the table names the process that used it.
+
+The loader needs `CAP_BPF`, `CAP_NET_ADMIN` and `CAP_CHOWN`, and only while it attaches the
+programs; it exits afterwards and the programs stay attached. It doesn't need
+`CAP_PERFMON`, so the programs can't read kernel memory. mihomo itself gets no extra
+capabilities: `mihomo.service` binds the table into its sandbox read-only and allows the
+`bpf` system call it reads it with. This setup has been tested on Linux 7.2.
+
+mihomo-sockowner is built from mihomo's source, next to mihomo itself, and needs Go 1.25 or
+later. In a mihomo checkout that has `component/process/ebpf`:
+
+```sh
+cd component/process/ebpf/loader
+CGO_ENABLED=0 go build -o mihomo-sockowner .
+sudo install -m 755 mihomo-sockowner /usr/local/bin/mihomo-sockowner
+sudo restorecon -v /usr/local/bin/mihomo-sockowner
+```
+
+Then install and enable the unit. It starts before mihomo whenever mihomo starts:
+
+```sh
+sudo install -m 644 mihomo-sockowner.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mihomo-sockowner.service
+sudo systemctl restart mihomo.service
+```
+
+`config.example.yaml` already points `find-process-bpf-map` at the table. When mihomo opens
+it, `sudo journalctl -u mihomo.service` shows "Using socket owners recorded in
+/run/mihomo-bpf/conn_owners".
+
+mihomo still reads the `exe` link of the owning process to get its path, so it keeps the
+access described next. Connections the table doesn't know, such as those of programs that
+opened them before mihomo-sockowner started, are looked up that way too.
+
+### Through /proc
+
+Without mihomo-sockowner, mihomo finds the process by reading the `fd` and `exe` links
+under `/proc/<pid>/` of other users' processes, which takes `CAP_SYS_PTRACE` and
+`CAP_DAC_READ_SEARCH`. This only works while the connection is still open. The SELinux
+policy keeps mihomo from opening those processes' files, so it can't read their
+environment, command line or memory. It can't stop mihomo from following their `root` and
+`cwd` links, though, which work the same way as `exe`. Through them a compromised mihomo
+can reach files outside its sandbox, as far as `mihomo_t` may read them.
+
+### Turning it off
 
 If you don't use these rules, turn the lookup off: set `find-process-mode: off` in
-`config.yaml`, turn off the SELinux boolean, and drop the two capabilities:
+`config.yaml`, turn off the SELinux boolean, disable mihomo-sockowner if you installed it,
+and drop the two capabilities:
 
 ```sh
 sudo setsebool -P mihomo_find_process off
+sudo systemctl disable --now mihomo-sockowner.service
 sudo mkdir -p /etc/systemd/system/mihomo.service.d
 printf '%s\n' '[Service]' \
     'CapabilityBoundingSet=' 'CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE' \
@@ -129,12 +183,14 @@ sudo systemctl restart mihomo.service
 ## Updating
 
 Rebuild and load the SELinux module, relabel `/etc/mihomo` (version 1.3 gave mihomo's
-writable files a type of their own), then install the files again as above and reload:
+writable files a type of their own) and, if you use it, `/usr/local/bin/mihomo-sockowner`
+(version 1.5 added its type). Then install the files again as above and reload:
 
 ```sh
 make -f /usr/share/selinux/devel/Makefile mihomo.pp
 sudo semodule -i mihomo.pp
 sudo restorecon -Rv /etc/mihomo
+sudo restorecon -v /usr/local/bin/mihomo-sockowner
 sudo systemctl daemon-reload
 sudo systemctl reload killswitch.service
 sudo systemctl restart mihomo.service mihomo-v6-direct.service

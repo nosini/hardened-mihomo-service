@@ -1,0 +1,47 @@
+[Unit]
+Description=Record the process behind each connection for mihomo
+# mihomo binds the map directory into its sandbox when it starts, so attach first. The
+# directory stays when this stops or restarts, and mihomo picks up the new map.
+Before=mihomo.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo attach
+ExecStop=/usr/local/bin/mihomo-sockowner detach
+
+# Loading and attaching cgroup BPF programs takes CAP_BPF and CAP_NET_ADMIN; CAP_CHOWN
+# gives the map to the mihomo group. The programs avoid helpers that need CAP_PERFMON,
+# which would let BPF programs read kernel memory.
+CapabilityBoundingSet=CAP_BPF CAP_NET_ADMIN CAP_CHOWN
+NoNewPrivileges=yes
+SystemCallFilter=@system-service bpf
+SystemCallArchitectures=native
+
+# The loader runs as root to pin in /sys/fs/bpf, whose root directory is root's alone.
+# ProtectKernelTunables= would make /sys/fs/bpf read-only too, and ReadWritePaths= can't
+# undo that, so the same paths are made read-only here with bpffs as the exception.
+# Attaching only opens /sys/fs/cgroup.
+ProtectSystem=strict
+ReadOnlyPaths=/sys /proc/sys /proc/sysrq-trigger /proc/fs /proc/irq
+ReadOnlyPaths=-/proc/acpi -/proc/latency_stats -/proc/timer_stats
+ReadWritePaths=/sys/fs/bpf
+ProtectControlGroups=yes
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+UMask=0077
+
+[Install]
+WantedBy=mihomo.service

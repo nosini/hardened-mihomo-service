@@ -1,6 +1,6 @@
 [Unit]
 Description=mihomo
-After=network-online.target killswitch.service
+After=network-online.target killswitch.service mihomo-sockowner.service
 Wants=network-online.target
 Requires=killswitch.service
 
@@ -21,7 +21,8 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 
-SystemCallFilter=@system-service
+# bpf is for reading the map of mihomo-sockowner.service; see "Process lookup" in README.md.
+SystemCallFilter=@system-service bpf
 SystemCallFilter=~open_by_handle_at name_to_handle_at kexec_load kexec_file_load swapon swapoff
 SystemCallArchitectures=native
 
@@ -43,6 +44,10 @@ BindReadOnlyPaths=/usr /proc /etc/mihomo
 BindReadOnlyPaths=-/etc/ssl -/etc/pki -/etc/ca-certificates -/var/lib/ca-certificates
 BindPaths=/dev/null /dev/net/tun /etc/mihomo/ruleset /etc/mihomo/cache.db
 BindPaths=-/etc/mihomo/geoip.metadb
+# The map mihomo-sockowner.service keeps of which process owns each connection. Only its
+# maps directory comes in; the pinned programs stay outside. config.yaml points
+# find-process-bpf-map here.
+BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf
 
 ProtectHome=yes
 ProtectKernelTunables=yes

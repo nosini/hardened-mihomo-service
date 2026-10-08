@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.4)
+policy_module(mihomo, 1.5)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -8,6 +8,10 @@ type mihomo_conf_t;
 type mihomo_data_t;
 
 init_daemon_domain(mihomo_t, mihomo_exec_t)
+# mihomo-sockowner, which attaches the BPF programs that record socket owners
+type mihomo_sockowner_t;
+type mihomo_sockowner_exec_t;
+init_daemon_domain(mihomo_sockowner_t, mihomo_sockowner_exec_t)
 files_type(mihomo_conf_t)
 files_type(mihomo_data_t)
 
@@ -111,3 +115,37 @@ tunable_policy(`mihomo_find_process',`
 
 # Kernel module loading for nftables expressions and TUN device
 allow mihomo_t kernel_t:system module_request;
+
+########################################
+#
+# mihomo-sockowner
+#
+
+gen_require(`
+    type bpf_t;
+')
+
+allow mihomo_sockowner_t self:capability { chown net_admin };
+allow mihomo_sockowner_t self:capability2 bpf;
+allow mihomo_sockowner_t self:bpf { map_create map_read map_write prog_load prog_run };
+
+# Attaching to the root cgroup opens /sys/fs/cgroup
+fs_list_cgroup_dirs(mihomo_sockowner_t)
+# The Go runtime reads cpu.max to size GOMAXPROCS, as for mihomo above
+dontaudit mihomo_sockowner_t cgroup_t:file { open read };
+# Pinning the links and the map in /sys/fs/bpf/mihomo; cilium/ebpf checks the filesystem
+# type first
+allow mihomo_sockowner_t bpf_t:filesystem getattr;
+fs_manage_bpf_dirs(mihomo_sockowner_t)
+fs_manage_bpf_files(mihomo_sockowner_t)
+# Looking up the mihomo group
+auth_read_passwd(mihomo_sockowner_t)
+
+# mihomo reads the map through the bind mount of /sys/fs/bpf/mihomo/maps. The map is keyed
+# by network namespace, whose cookie mihomo gets with getsockopt(SO_NETNS_COOKIE).
+tunable_policy(`mihomo_find_process',`
+    allow mihomo_t self:udp_socket getopt;
+    fs_list_bpf_dirs(mihomo_t)
+    allow mihomo_t bpf_t:file { getattr read };
+    allow mihomo_t mihomo_sockowner_t:bpf map_read;
+')
