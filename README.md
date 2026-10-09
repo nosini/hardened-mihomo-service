@@ -205,8 +205,9 @@ sudo systemctl restart mihomo.service
 
 mihomo-sockowner can still record which process owns each connection, without the
 programs that need the BPF LSM. That keeps short UDP exchanges matching their rules while
-the process runs; mihomo then reads the path from `/proc`. Install it as above and run it
-without `-exec-paths`:
+the process runs; mihomo then reads the path from `/proc`. Without the BPF LSM, though, a
+connected socket that one process hands to another is still credited to the first. Install
+it as above and run it without `-exec-paths`:
 
 ```sh
 sudo mkdir -p /etc/systemd/system/mihomo-sockowner.service.d

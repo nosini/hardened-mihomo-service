@@ -12,11 +12,11 @@ ExecStop=/usr/local/bin/mihomo-sockowner detach
 
 # Loading and attaching cgroup BPF programs takes CAP_BPF and CAP_NET_ADMIN; CAP_CHOWN
 # gives the maps to the mihomo group. -exec-paths also records each process's executable,
-# so that mihomo needn't read other processes' /proc entries. Those programs are LSM
-# programs that read kernel structures, which takes CAP_PERFMON and lets them read
-# kernel memory. They are fixed and checked by the kernel's verifier, and the loader
-# exits once they are attached. Without -exec-paths, drop CAP_PERFMON and see "Process
-# lookup" in README.md.
+# so that mihomo needn't read other processes' /proc entries, and the process that sends
+# on a connected socket. Those programs are LSM programs that read kernel structures,
+# which takes CAP_PERFMON and lets them read kernel memory. They are fixed and checked by
+# the kernel's verifier, and the loader exits once they are attached. Without
+# -exec-paths, drop CAP_PERFMON and see "Process lookup" in README.md.
 CapabilityBoundingSet=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_CHOWN
 NoNewPrivileges=yes
 SystemCallFilter=@system-service bpf
