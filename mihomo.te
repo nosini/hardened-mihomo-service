@@ -68,7 +68,8 @@ manage_dirs_pattern(mihomo_t, mihomo_data_t, mihomo_data_t)
 manage_files_pattern(mihomo_t, mihomo_data_t, mihomo_data_t)
 
 # The systemd generator reads lookup settings before mihomo's sandbox is created.
-# The distribution labels third-party generators systemd_generic_generator_exec_t.
+# The distribution labels generators in /usr/lib systemd_generic_generator_exec_t;
+# mihomo.fc gives the one in /etc/systemd/system-generators the same type.
 optional_policy(`
     gen_require(`
         type systemd_generic_generator_t;

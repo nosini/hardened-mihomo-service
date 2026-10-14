@@ -1,5 +1,6 @@
 /usr/bin/mihomo          --    gen_context(system_u:object_r:mihomo_exec_t,s0)
 /usr/bin/mihomo-sockowner --   gen_context(system_u:object_r:mihomo_sockowner_exec_t,s0)
+/etc/systemd/system-generators/mihomo-process-generator -- gen_context(system_u:object_r:systemd_generic_generator_exec_t,s0)
 /etc/mihomo(/.*)?             gen_context(system_u:object_r:mihomo_conf_t,s0)
 /etc/mihomo/ruleset(/.*)?     gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/cache\.db    --   gen_context(system_u:object_r:mihomo_data_t,s0)

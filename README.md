@@ -83,10 +83,14 @@ sudo install -m 644 nftables-killswitch.conf /etc/nftables-killswitch.conf
 sudo nft -c -f /etc/nftables-killswitch.conf
 sudo install -m 644 killswitch.service mihomo.service /etc/systemd/system/
 sudo install -D -m 755 mihomo-process-generator \
-    /usr/local/lib/systemd/system-generators/mihomo-process-generator
-sudo restorecon -v /usr/local/lib/systemd/system-generators/mihomo-process-generator
+    /etc/systemd/system-generators/mihomo-process-generator
+sudo restorecon -v /etc/systemd/system-generators/mihomo-process-generator
 sudo systemctl daemon-reload
 ```
+
+The generator goes in `/etc`, not `/usr/local`: systemd runs generators at boot before it
+mounts file systems other than `/` and `/usr`, and `/usr/local` is often one of them (a
+btrfs subvolume on openSUSE). Without the generator, mihomo doesn't start.
 
 The example uses BPF-only process lookup. Before starting mihomo, install
 mihomo-sockowner as described in [Process lookup](#process-lookup), or set
@@ -280,7 +284,8 @@ sudo systemctl restart mihomo.service
 When updating from the manually configured lookup sandbox, install the generator and
 both units. Remove the old capability drop-in and the loader's old enablement link, so
 that lookup settings in `config.yaml` control the sandbox and dependency. Version 1.7
-also lets the systemd generator read the configuration under SELinux and allows both
+also labels the generator in `/etc/systemd/system-generators`, lets it read the
+configuration under SELinux, and allows both
 lookup methods unconditionally. The old `mihomo_find_process` and
 `mihomo_find_process_proc` booleans are removed; YAML and the generated systemd sandbox
 select the available lookup methods:
@@ -292,8 +297,8 @@ make -f /usr/share/selinux/devel/Makefile mihomo.pp
 sudo semodule -i mihomo.pp
 sudo install -m 644 mihomo.service mihomo-sockowner.service /etc/systemd/system/
 sudo install -D -m 755 mihomo-process-generator \
-    /usr/local/lib/systemd/system-generators/mihomo-process-generator
-sudo restorecon -v /usr/local/lib/systemd/system-generators/mihomo-process-generator
+    /etc/systemd/system-generators/mihomo-process-generator
+sudo restorecon -v /etc/systemd/system-generators/mihomo-process-generator
 sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
