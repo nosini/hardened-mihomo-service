@@ -196,15 +196,28 @@ loaded, and the loader has no network access and takes no input but its command 
 return, mihomo, which handles network traffic and serves its API, needs no capabilities
 and no access to other processes for this.
 
-mihomo-sockowner is built from mihomo's source, next to mihomo itself, and needs Go 1.25 or
-later. In a mihomo checkout that has `component/process/ebpf`:
+Install `mihomo-sockowner` separately from the
+[socketowner repository](https://github.com/nosini/socketowner). It is no longer
+part of the mihomo source or build. To build it with Go 1.25 or newer, run these
+commands from a socketowner checkout:
 
 ```sh
-cd component/process/ebpf/loader
 CGO_ENABLED=0 go build -o mihomo-sockowner .
 sudo install -m 755 mihomo-sockowner /usr/local/bin/mihomo-sockowner
 sudo restorecon -v /usr/local/bin/mihomo-sockowner
 ```
+
+The loader and mihomo use [map interface v1](https://github.com/nosini/socketowner/blob/main/docs/map-interface.md).
+The updated mihomo reader requires the loader's `abi_version` map. When migrating
+from the loader formerly included in mihomo, install this loader and restart it
+before starting the updated mihomo:
+
+```sh
+sudo systemctl restart mihomo-sockowner.service
+```
+
+Keep loader installation and updates separate from mihomo updates; replacing
+mihomo must not replace the privileged executable.
 
 Then install the unit and restart mihomo. The generator starts the loader with mihomo
 whenever process lookup is on, so it needs no enabling:
