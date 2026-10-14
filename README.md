@@ -132,7 +132,7 @@ drop-in for `mihomo.service`:
 | --- | --- |
 | `find-process-mode: off` | Other users' processes hidden; no BPF maps or inspection capabilities |
 | `find-process-bpf-only: true` with matching enabled | Other users' processes hidden; requires mihomo-sockowner and its maps |
-| `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; BPF maps optional |
+| `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; starts mihomo-sockowner, whose maps are optional |
 
 Matching is enabled with `always` or `strict` (mihomo's default). If
 `find-process-bpf-only` is absent or false, mihomo permits `/proc` fallback. It still
@@ -148,8 +148,9 @@ Mihomo itself never needs `CAP_BPF` to read the maps.
 
 The service keeps a read-only `/proc` for its own memory statistics and other runtime
 uses. `ProtectProc=invisible` hides other users' processes in BPF-only and off modes.
-The generator does not inspect whether the loader is currently active: BPF-only mode
-starts it as a dependency, and attachment failure prevents mihomo from starting.
+The generator does not inspect whether the loader is currently active. Both lookup
+modes start it with mihomo. In BPF-only mode, attachment failure prevents mihomo from
+starting; in `/proc` mode, mihomo starts anyway and falls back to `/proc`.
 
 After changing lookup mode, reload and restart; an API configuration reload alone cannot
 change an existing process's sandbox:
@@ -201,8 +202,8 @@ sudo install -m 755 mihomo-sockowner /usr/local/bin/mihomo-sockowner
 sudo restorecon -v /usr/local/bin/mihomo-sockowner
 ```
 
-Then install the unit and restart mihomo. The generator makes BPF-only mode require
-the loader without needing to enable it separately:
+Then install the unit and restart mihomo. The generator starts the loader with mihomo
+whenever process lookup is on, so it needs no enabling:
 
 ```sh
 sudo install -m 644 mihomo-sockowner.service /etc/systemd/system/
@@ -213,7 +214,8 @@ sudo systemctl restart mihomo.service
 In BPF-only mode, mihomo requires it. Otherwise process rules would silently stop matching
 whenever the programs aren't attached. If they fail to attach, mihomo doesn't start, and
 `sudo journalctl -u mihomo-sockowner.service` shows why. Restarting or stopping
-mihomo-sockowner restarts or stops mihomo too.
+mihomo-sockowner restarts or stops mihomo too. In `/proc` mode, mihomo starts even if the
+loader fails, and searches `/proc` instead.
 
 `config.example.yaml` already points `find-process-bpf-map` at the tables and sets
 `find-process-bpf-only: true`. When mihomo opens them, `sudo journalctl -u mihomo.service`
@@ -245,11 +247,12 @@ sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
 
-mihomo-sockowner can still record which process owns each connection, without the
-programs that need the BPF LSM. That keeps short UDP exchanges matching their rules while
-the process runs; mihomo then reads the path from `/proc`. Without the BPF LSM, though, a
-connected socket that one process hands to another is still credited to the first. Install
-it as above and run it without `-exec-paths`:
+The generator starts mihomo-sockowner in this mode too. Without the BPF LSM it can still
+record which process owns each connection, though not what each process runs. That keeps
+short UDP exchanges matching their rules while the process runs; mihomo then reads the
+path from `/proc`. Without it, though, a connected socket that one process hands
+to another is still credited to the first. Install it as above and run it without
+`-exec-paths`:
 
 ```sh
 sudo mkdir -p /etc/systemd/system/mihomo-sockowner.service.d
@@ -257,18 +260,18 @@ printf '%s\n' '[Service]' 'ExecStart=' \
     'ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo attach' |
     sudo tee /etc/systemd/system/mihomo-sockowner.service.d/no-exec-paths.conf
 sudo systemctl daemon-reload
-sudo systemctl enable --now mihomo-sockowner.service
+sudo systemctl restart mihomo-sockowner.service
 sudo systemctl restart mihomo.service
 ```
 
 ### Turning it off
 
-If you don't use these rules, set `find-process-mode: off` in `config.yaml` and stop
-mihomo-sockowner. Reload first so stopping the loader no longer stops mihomo:
+If you don't use these rules, set `find-process-mode: off` in `config.yaml`. mihomo then
+no longer starts mihomo-sockowner. Reload first so stopping the loader doesn't stop mihomo:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl disable --now mihomo-sockowner.service
+sudo systemctl stop mihomo-sockowner.service
 sudo systemctl restart mihomo.service
 ```
 
@@ -295,9 +298,9 @@ sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
 
-In `/proc` mode, enable mihomo-sockowner again only if you want its optional socket-owner
-acceleration. In BPF-only mode, remove any `no-exec-paths.conf` loader drop-in so it records
-executables too.
+mihomo-sockowner no longer needs to be enabled: the generator starts it with mihomo
+whenever process lookup is on. In BPF-only mode, remove any `no-exec-paths.conf` loader
+drop-in so it records executables too.
 
 Rebuild and load the SELinux module, relabel `/etc/mihomo` (version 1.3 gave mihomo's
 writable files a type of their own) and, if you use it, `/usr/local/bin/mihomo-sockowner`

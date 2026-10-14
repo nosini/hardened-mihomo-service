@@ -53,6 +53,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertIn(f"{directive}=\n{directive}=CAP_NET_ADMIN CAP_NET_BIND_SERVICE "
                           "CAP_SYS_PTRACE CAP_DAC_READ_SEARCH", unit)
         self.assertNotIn("Requires=", unit)
+        self.assertIn("Wants=mihomo-sockowner.service", unit)
         self.assertIn("BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
 
     def test_defaults_match_mihomo(self):
@@ -67,7 +68,7 @@ class GeneratorTests(unittest.TestCase):
                 self.assertEqual(status, 0, errors)
                 self.assertNotIn("SYS_PTRACE", unit)
                 self.assertNotIn("BindReadOnlyPaths", unit)
-                self.assertNotIn("Requires=", unit)
+                self.assertNotIn("mihomo-sockowner", unit)
 
     def test_yaml_comments_nested_settings_aliases_and_merges(self):
         status, unit, errors = self.generate(

@@ -47,7 +47,6 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# BPF-only mode makes mihomo require this through mihomo-process-generator, even if
-# this unit isn't enabled. Enable it here only for optional acceleration in /proc mode.
-[Install]
-WantedBy=multi-user.target
+# No [Install] section: mihomo-process-generator makes mihomo start this whenever
+# process lookup is on. In BPF-only mode mihomo requires it; in /proc mode mihomo
+# starts without it if attaching fails.

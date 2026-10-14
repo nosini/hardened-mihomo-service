@@ -1,3 +1,6 @@
 # SELinux module build output (make -f /usr/share/selinux/devel/Makefile)
 /tmp/
 *.pp
+
+# Bytecode from running the generator tests
+__pycache__/
