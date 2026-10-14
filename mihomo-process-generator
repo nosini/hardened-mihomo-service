@@ -1,0 +1,184 @@
+#!/usr/bin/python3 -I
+"""Select mihomo's process-lookup sandbox from its existing YAML settings."""
+
+from pathlib import Path
+import re
+import sys
+
+
+CONFIG = Path("/etc/mihomo/config.yaml")
+MAP = "/run/mihomo-bpf/conn_owners"
+START = "ExecStart=\nExecStart=/usr/local/bin/mihomo -d /etc/mihomo\n"
+DENY = "[Service]\nExecStart=\nExecStart=/usr/bin/false\n"
+
+
+NULL = "tag:yaml.org,2002:null"
+BOOL = "tag:yaml.org,2002:bool"
+STR = "tag:yaml.org,2002:str"
+MERGE = "tag:yaml.org,2002:merge"
+DEFAULT_MAP = "/sys/fs/bpf/mihomo/maps/conn_owners"
+BOOLEANS = {
+    **dict.fromkeys(("true", "True", "TRUE"), True),
+    **dict.fromkeys(("false", "False", "FALSE"), False),
+}
+# yaml.v3 still accepts YAML 1.1 spellings, plain or quoted, for typed booleans.
+LEGACY_BOOLEANS = {
+    **dict.fromkeys(("y", "Y", "yes", "Yes", "YES", "on", "On", "ON"), True),
+    **dict.fromkeys(("n", "N", "no", "No", "NO", "off", "Off", "OFF"), False),
+}
+
+
+def compose(filename):
+    # Import here so a missing PyYAML also leaves a drop-in that prevents startup.
+    import yaml
+
+    class Loader(yaml.SafeLoader):
+        def compose_node(self, parent, index):
+            # yaml.v3 lets a later anchor replace an earlier one of the same name.
+            if not self.check_event(yaml.AliasEvent):
+                self.anchors.pop(self.peek_event().anchor, None)
+            return super().compose_node(parent, index)
+
+    # Mihomo uses YAML 1.2 resolution, where find-process-mode: off is a string.
+    # Only true and false resolve to booleans.
+    Loader.yaml_implicit_resolvers = {
+        key: [(tag, regex) for tag, regex in values if tag != BOOL]
+        for key, values in Loader.yaml_implicit_resolvers.items()
+    }
+    Loader.add_implicit_resolver(
+        BOOL, re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"), list("tTfF"))
+    # Like yaml.v3, use the first document.
+    with filename.open() as stream:
+        return next(yaml.compose_all(stream, Loader=Loader), None), yaml
+
+
+def top_level(root, yaml):
+    """Find top-level values the way yaml.v3 decodes mihomo's configuration struct.
+
+    Works on the composed nodes, which PyYAML's merge flattening would modify:
+    each mapping's own keys must be unique, explicit keys win over merged ones,
+    and earlier merge sources win over later ones.
+    """
+    found = {}
+    active = set()
+    done = set()
+
+    def visit(node):
+        if not isinstance(node, yaml.MappingNode):
+            raise ValueError("configuration and merge sources must be mappings")
+        if id(node) in active:
+            raise ValueError("recursive YAML merge")
+        if id(node) in done:
+            return
+        active.add(id(node))
+        keys = set()
+        merge = None
+        for key, value in node.value:
+            if not isinstance(key, yaml.ScalarNode):
+                continue
+            # Like yaml.v3, compare the keys as written, including <<.
+            if key.value in keys:
+                raise ValueError("duplicate YAML key")
+            keys.add(key.value)
+            if key.tag == MERGE:
+                merge = value
+            else:
+                found.setdefault(key.value, value)
+        if merge is not None:
+            for source in merge.value if isinstance(merge, yaml.SequenceNode) else [merge]:
+                visit(source)
+        active.remove(id(node))
+        done.add(id(node))
+
+    visit(root)
+    return found
+
+
+def lookup_mode(filename):
+    root, yaml = compose(filename)
+    if root is None:
+        raise ValueError("configuration must be a mapping")
+    found = top_level(root, yaml)
+
+    def scalar(name):
+        # Null leaves mihomo's default in place.
+        node = found.get(name)
+        if node is None or node.tag == NULL:
+            return None
+        if not isinstance(node, yaml.ScalarNode):
+            raise ValueError(f"{name} must be a scalar")
+        return node
+
+    # find-process-mode is decoded as text, whatever the scalar resolves to.
+    node = scalar("find-process-mode")
+    process_mode = "strict" if node is None else node.value.lower()
+    if process_mode not in ("off", "strict", "always"):
+        raise ValueError("invalid find-process-mode")
+
+    node = scalar("find-process-bpf-only")
+    if node is None:
+        only = False
+    elif node.tag == BOOL and node.value in BOOLEANS:
+        only = BOOLEANS[node.value]
+    elif node.tag == STR and node.value in LEGACY_BOOLEANS:
+        only = LEGACY_BOOLEANS[node.value]
+    else:
+        raise ValueError("find-process-bpf-only must be a boolean")
+
+    node = scalar("find-process-bpf-map")
+    bpf_map = DEFAULT_MAP if node is None else node.value
+
+    if process_mode == "off":
+        return "off"
+    if not only:
+        return "proc"
+    if bpf_map != MAP:
+        raise ValueError("BPF-only lookup requires the service's map path")
+    return "bpf"
+
+
+def dropin(mode):
+    if mode == "bpf":
+        return (
+            "[Unit]\nRequires=mihomo-sockowner.service\nAfter=mihomo-sockowner.service\n"
+            "\n[Service]\n" + START +
+            "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n"
+        )
+    if mode == "proc":
+        return (
+            "[Service]\n" + START +
+            "ProtectProc=default\n"
+            "CapabilityBoundingSet=\n"
+            "CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH\n"
+            "AmbientCapabilities=\n"
+            "AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_SYS_PTRACE CAP_DAC_READ_SEARCH\n"
+            # Optional socket-owner acceleration, including without -exec-paths.
+            "BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n"
+        )
+    if mode == "off":
+        return "[Service]\n" + START
+    raise ValueError("invalid lookup mode")
+
+
+def generate(output, config=CONFIG):
+    directory = output / "mihomo.service.d"
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / "50-process-lookup.conf"
+    target.write_text(DENY)
+    try:
+        contents = dropin(lookup_mode(config))
+    except Exception:
+        # YAML errors can include credentials from the offending line. Log no
+        # configuration contents, and do not grant access on a parsing failure.
+        print("mihomo-process-generator: cannot read lookup settings from "
+              "/etc/mihomo/config.yaml; check YAML, lookup settings and PyYAML; "
+              "mihomo startup is blocked", file=sys.stderr)
+        return 1
+    target.write_text(contents)
+    return 0
+
+
+if __name__ == "__main__":
+    if len(sys.argv) not in (2, 4):
+        sys.exit("usage: mihomo-process-generator NORMAL-DIR [EARLY-DIR LATE-DIR]")
+    sys.exit(generate(Path(sys.argv[1])))

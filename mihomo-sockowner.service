@@ -47,9 +47,7 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 UMask=0077
 
-# Enabling this makes mihomo require it: with find-process-bpf-only, mihomo can't name
-# processes without these maps, so PROCESS-NAME and PROCESS-PATH rules would silently stop
-# matching. If attaching fails, mihomo doesn't start; stopping or restarting this stops or
-# restarts mihomo too.
+# BPF-only mode makes mihomo require this through mihomo-process-generator, even if
+# this unit isn't enabled. Enable it here only for optional acceleration in /proc mode.
 [Install]
-RequiredBy=mihomo.service
+WantedBy=multi-user.target

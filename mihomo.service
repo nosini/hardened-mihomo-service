@@ -8,16 +8,16 @@ Requires=killswitch.service
 Type=simple
 User=mihomo
 Group=mihomo
-ExecStart=/usr/local/bin/mihomo -d /etc/mihomo
+# The generator selects the sandbox and replaces this command. If it is missing or
+# can't read config.yaml, fail rather than start with mismatched lookup permissions.
+ExecStart=/usr/bin/false
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=1048576
 
 # CAP_NET_RAW dropped (no AF_PACKET / raw-socket use). Restore on both lines
 # if transparent proxy or raw sockets break.
-# Process lookup (find-process-mode) reads the maps of mihomo-sockowner.service and
-# needs no capabilities. Looking processes up through /proc instead takes
-# CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH; see "Process lookup" in README.md.
+# The generator adds process-inspection capabilities only for /proc lookup.
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE
 NoNewPrivileges=yes
@@ -29,7 +29,7 @@ SystemCallArchitectures=native
 
 TemporaryFileSystem=/:ro
 # Config dir is read-only; only the paths mihomo actually updates are writable.
-# /proc is read-only too.
+# /proc is read-only too, with other users' processes hidden unless lookup needs them.
 # cache.db MUST be writable: profile.store-fake-ip/store-selected open it O_RDWR, and a
 # read-only mount breaks the fake-ip store (apps then leak to real IPs).
 # ruleset/ and cache.db must exist before start (mihomo.tmpfiles creates them), because
@@ -41,14 +41,14 @@ TemporaryFileSystem=/:ro
 # root would be labeled root_t, and SELinux doesn't let init_t create those (directories
 # are fine). Binding all of /etc would expose too much. So the "system" nameserver and
 # dns.use-system-hosts don't work; configure DNS explicitly.
-BindReadOnlyPaths=/usr /proc /etc/mihomo
+BindReadOnlyPaths=/usr /etc/mihomo
 BindReadOnlyPaths=-/etc/ssl -/etc/pki -/etc/ca-certificates -/var/lib/ca-certificates
 BindPaths=/dev/null /dev/net/tun /etc/mihomo/ruleset /etc/mihomo/cache.db
 BindPaths=-/etc/mihomo/geoip.metadb
-# The maps mihomo-sockowner.service keeps of which process owns each connection and what
-# each process runs. Only its maps directory comes in; the pinned programs stay outside.
-# config.yaml points find-process-bpf-map here.
-BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf
+# The generator binds the BPF maps when process lookup is enabled.
+# Binding the host's /proc here would cover the private proc mount and defeat hidepid.
+ProtectProc=invisible
+ReadOnlyPaths=/proc
 
 ProtectHome=yes
 ProtectKernelTunables=yes

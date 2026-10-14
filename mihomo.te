@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.6)
+policy_module(mihomo, 1.7)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -15,23 +15,8 @@ init_daemon_domain(mihomo_sockowner_t, mihomo_sockowner_exec_t)
 files_type(mihomo_conf_t)
 files_type(mihomo_data_t)
 
-## <desc>
-## <p>
-## Allow mihomo to find out which process owns a connection, for PROCESS-NAME and
-## PROCESS-PATH rules (find-process-mode), from the maps of mihomo-sockowner. Turn this
-## off if you don't use them.
-## </p>
-## </desc>
-gen_tunable(mihomo_find_process, true)
-
-## <desc>
-## <p>
-## Allow mihomo to find out which process owns a connection by searching /proc, for
-## kernels without the BPF LSM that mihomo-sockowner needs. This lets mihomo read the
-## links of every process under /proc.
-## </p>
-## </desc>
-gen_tunable(mihomo_find_process_proc, false)
+# Allow both process-lookup methods in SELinux. The systemd generator selects the
+# available methods through the service's mounts, process visibility and capabilities.
 
 domain_getattr_all_domains(mihomo_t)
 
@@ -82,6 +67,16 @@ allow mihomo_t mihomo_conf_t:file read_file_perms;
 manage_dirs_pattern(mihomo_t, mihomo_data_t, mihomo_data_t)
 manage_files_pattern(mihomo_t, mihomo_data_t, mihomo_data_t)
 
+# The systemd generator reads lookup settings before mihomo's sandbox is created.
+# The distribution labels third-party generators systemd_generic_generator_exec_t.
+optional_policy(`
+    gen_require(`
+        type systemd_generic_generator_t;
+    ')
+    allow systemd_generic_generator_t mihomo_conf_t:dir search_dir_perms;
+    allow systemd_generic_generator_t mihomo_conf_t:file read_file_perms;
+')
+
 # CA bundles and the symlinks that point into them
 miscfiles_read_generic_certs(mihomo_t)
 # os/exec points a child's unused stdio at /dev/null
@@ -115,13 +110,11 @@ kernel_read_system_state(mihomo_t)
 # What this can't take away: /proc/<pid>/root and cwd are links of the same kind as exe,
 # so a compromised mihomo can reach files outside its sandbox through them. Its own type
 # enforcement still decides which of those files it can read.
-tunable_policy(`mihomo_find_process_proc',`
-    allow mihomo_t self:capability { dac_read_search sys_ptrace };
-    allow mihomo_t self:cap_userns sys_ptrace;
-    allow mihomo_t domain:dir { getattr open read search };
-    allow mihomo_t domain:lnk_file { getattr read };
-    allow mihomo_t domain:file read;
-')
+allow mihomo_t self:capability { dac_read_search sys_ptrace };
+allow mihomo_t self:cap_userns sys_ptrace;
+allow mihomo_t domain:dir { getattr open read search };
+allow mihomo_t domain:lnk_file { getattr read };
+allow mihomo_t domain:file read;
 
 # Kernel module loading for nftables expressions and TUN device
 allow mihomo_t kernel_t:system module_request;
@@ -157,9 +150,7 @@ auth_read_passwd(mihomo_sockowner_t)
 # mihomo reads the maps through the bind mount of /sys/fs/bpf/mihomo/maps. The socket
 # owners are keyed by network namespace, whose cookie mihomo gets with
 # getsockopt(SO_NETNS_COOKIE).
-tunable_policy(`mihomo_find_process',`
-    allow mihomo_t self:udp_socket getopt;
-    fs_list_bpf_dirs(mihomo_t)
-    allow mihomo_t bpf_t:file { getattr read };
-    allow mihomo_t mihomo_sockowner_t:bpf map_read;
-')
+allow mihomo_t self:udp_socket getopt;
+fs_list_bpf_dirs(mihomo_t)
+allow mihomo_t bpf_t:file { getattr read };
+allow mihomo_t mihomo_sockowner_t:bpf map_read;
