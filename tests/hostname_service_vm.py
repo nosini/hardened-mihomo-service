@@ -529,6 +529,17 @@ rules:
             return routes and routes[0]['dev'] == 'Mihomo'
 
         wait(tun_ready)
+        if FAMILY == 6:
+            # A connect without a source can choose the TUN while a connected
+            # socket's later lookup bypasses it. Test both sourceful paths,
+            # including the loopback input selector used for local output.
+            def route_device(source, incoming):
+                routes = json.loads(call('ip', '-j', '-6', 'route', 'get', remote,
+                                         'from', source, 'iif', incoming).stdout)
+                return routes[0]['dev']
+            assert route_device('fdfe:dcba:9876::1', 'lo') == 'Mihomo'
+            assert route_device(local, 'lo') == 'review1'
+            assert route_device('fdfe:dcba:9876::1', 'Mihomo') == 'review1'
         inbound = 'Redir' if AUTO_REDIRECT else 'Tun'
         if AUTO_REDIRECT:
             auto_redirect_port = int(wait(lambda: re.search(r'redirect to :(\d+)',
@@ -615,7 +626,12 @@ rules:
             worker.start()
             complete = False
             try:
-                for _ in range(1 if pin_failure else rounds):
+                for round_index in range(1 if pin_failure else rounds):
+                    if FAMILY == 6 and round_index:
+                        # Force a fresh route lookup on the same live TLS
+                        # connection instead of relying on an intermittent
+                        # socket-cache expiry to expose sourceful routing.
+                        call('ip', '-6', 'route', 'flush', 'cache')
                     reply = command(f'exchange {slot}')
                     expected = 'pin-failed' if pin_failure else f'ok TLSv1.{version - 10}'
                     if reply != f'exchange {slot} {expected}':

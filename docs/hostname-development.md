@@ -143,14 +143,17 @@ publication, lifetime, bootstrap and routing matrices. Run it after changes to
 observer initialization or link ownership, using a temporary three-module Go
 workspace containing socketowner, socketowner/hostname and Mihomo.
 
-IPv6 system-stack and auto-redirect regressions exposed an intermittent auto-route
-transport failure after successful attribution/handshake: subsequent application
-packets selected the uplink instead of `Mihomo`. nft trace confirmed a drop by
-the shipped kill switch's output policy. This remains unresolved; an earlier
-successful matrix does not establish reliable IPv6 transport. No
-firewall exception or matrix retry was added. IPv4 auto-redirect passed.
-Repeated final IPv6 runs failed, despite earlier complete passes. On session exchange failure, the harness saves socket and route
-state for diagnosis.
+The IPv6 route regression distinguishes initial connects from lookups with an
+already selected source. A known TUN source with `iif lo` must still select
+`Mihomo`; a physical source and reinjected TUN traffic must select the uplink.
+Unpatched sing-tun 0.4.27 fails the first assertion. Mihomo's Linux TUN
+constructor moves only its two blanket bypasses behind its existing source
+lookups, retaining the backend's owned priority range and cleanup. No dependency
+fork or extra module version is needed.
+During the three-exchange TLS cases, IPv6 route-cache flushes force fresh
+lookups on the same live connection. No test connection is retried and no
+firewall exception bypasses the shipped kill switch. Failures retain socket
+and route state for diagnosis.
 
 One IPv6 loopback REDIRECT recovery run also selected ordinary fallback for the
 first expected named connection after automatic observer restart. Earlier and
