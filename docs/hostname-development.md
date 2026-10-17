@@ -48,8 +48,11 @@ shipped private-network unit. `nsenter` changes only the harness's network
 namespace, preserving the VM's selinuxfs mount for enforcing-state checks.
 The fixture omits the unrelated network-online dependency and external kill-switch
 include, enables a controlled dual-stack REDIRECT listener with sniffing/DNS/TUN
-off, and adds only a target-specific local REDIRECT rule. It does not modify guest uplinks
-or an existing network-protection service. Only the fixture network namespace
+off, and adds only a target-specific local REDIRECT rule. A later group switches
+to the shipped TUN shape (system stack, auto-route, auto-detect-interface,
+device `Mihomo`) and reaches a server behind a veth in a second fixture
+namespace. It does not modify guest uplinks or an existing network-protection
+service. Only the fixture network namespace
 uses reduced TCP receive-buffer defaults to force nonblocking ClientHello
 retries; the harness checks that the guest defaults remain unchanged.
 
@@ -66,9 +69,9 @@ The full-TLS matrix also fixes TLS 1.2/1.3, verifies the peer certificate and
 hostname with a client-only test trust store, checks a SHA-256 certificate pin,
 and exchanges known application bytes in both directions. Untrusted certificates,
 wrong hostnames and wrong pins must fail without delivering application data.
-Each family runs eighteen TLS cases: twelve successful exchanges (including
+Each family runs nineteen TLS cases: thirteen successful exchanges (including
 large ClientHellos, actual short-write retries, observer stop/restart, recovery
-after SIGKILL and feature disablement) and six intentional rejections. Both TLS
+after SIGKILL, feature disablement and TUN) and six intentional rejections. Both TLS
 versions exercise a ClientHello above 4 KiB and a pending write that starts with
 `SSL_ERROR_WANT_WRITE`, then completes through the real redirect listener. After
 the handshake and application exchange, the same connection ID and chain must
@@ -78,7 +81,12 @@ original destination IP/port.
 
 Run both family selections sequentially; they use the same temporary service
 paths. The control API starts before inbound listeners, so the harness waits for
-the REDIRECT listener too. Empty connection snapshots are retried. Certificate
+the REDIRECT listener too. The TUN group waits for its address to finish IPv6
+duplicate-address detection, its system-stack listener and the application's
+route into the device before opening the first connection. Empty connection
+snapshots are retried. A wrong-pin client may close while the server writes a
+TLS 1.3 session ticket; broken-pipe or connection-reset errors are accepted only
+in that rejection case, which must still deliver no application request. Certificate
 keys remain in the task run directory for its owner to remove after collecting
 logs; no test trust enters the system store. The harness collects service
 journals and client stderr before removing its own installations and policy.

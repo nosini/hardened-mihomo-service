@@ -23,6 +23,8 @@ import time
 import urllib.request
 
 NS = 'mihomo-hostname-review'
+# Holds the TUN group's server, so its address is not local to NS.
+REMOTE = 'mihomo-hostname-remote'
 RUN = None
 PACK = None
 FAMILY = 4
@@ -78,6 +80,7 @@ def inside():
     installed = []
     created_user = False
     client = None
+    tun_server = None
     address = '127.0.0.1' if FAMILY == 4 else '::1'
     server = socket.socket(socket.AF_INET if FAMILY == 4 else socket.AF_INET6)
     server.bind((address, 0))
@@ -223,24 +226,29 @@ rules:
             assert ready, text
             return client.stdout.readline().strip()
 
-        def probe(named):
+        def probe(named, listener=None, inbound='Redir'):
             opened = command('open route.invalid name-first fd')
             assert opened.startswith('socket '), opened
             slot = int(opened.split()[1])
             command(f'handshake {slot}')
-            accepted, _ = server.accept()
+            accepted, _ = (listener or server).accept()
             try:
                 accepted.settimeout(5)
                 data = accepted.recv(4096)
                 assert data.startswith(b'\x16\x03') and b'route.invalid' in data, data
                 connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
                 assert ('NAMED' in connection['chains']) == named, connection
+                assert connection['metadata']['type'] == inbound, connection
+                # The real destination is kept, never replaced by the name.
+                peer = accepted.getsockname()
+                assert connection['metadata']['destinationIP'] == peer[0], connection
+                assert connection['metadata']['destinationPort'] == str(peer[1]), connection
             finally:
                 command(f'close {slot}')
                 accepted.close()
                 wait(lambda: not api('/connections')['connections'])
 
-        def tls_probe(named, version, failure=None, window=None):
+        def tls_probe(named, version, failure=None, window=None, listener=None, inbound='Redir'):
             if window == 'retry':
                 assert command('tiny-send') == 'ok'
             opened = command('open route.invalid name-first fd')
@@ -260,12 +268,14 @@ rules:
             assert hello == f'handshake {slot} -1 {expected_error}', hello
             # WANT_WRITE proves the live TLS exchange begins with a pending
             # nonblocking write, then exchange must drain it through TLS.
-            accepted, _ = server.accept()
+            accepted, _ = (listener or server).accept()
             accepted.settimeout(5)
             connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
             assert ('NAMED' in connection['chains']) == named, connection
-            assert connection['metadata']['destinationIP'] == address, connection
-            assert connection['metadata']['destinationPort'] == str(port), connection
+            assert connection['metadata']['type'] == inbound, connection
+            expected = (listener or server).getsockname()
+            assert connection['metadata']['destinationIP'] == expected[0], connection
+            assert connection['metadata']['destinationPort'] == str(expected[1]), connection
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(str(RUN / 'peer.pem'), str(RUN / 'peer.key'))
             protocol = ssl.TLSVersion.TLSv1_2 if version == 12 else ssl.TLSVersion.TLSv1_3
@@ -319,10 +329,14 @@ rules:
             if failure in ('trust', 'hostname'):
                 assert isinstance(result['error'], ssl.SSLError), result
                 assert result['request'] == b'', result
+            elif failure == 'pin':
+                # The client closes after checking the certificate pin. A TLS
+                # 1.3 session-ticket write can race that close on the server.
+                assert result['error'] is None or isinstance(
+                    result['error'], (BrokenPipeError, ConnectionResetError)), result
+                assert result['request'] == b'', result
             else:
                 assert result['error'] is None, result
-                if failure == 'pin':
-                    assert result['request'] == b'', result
             wait(lambda: not api('/connections')['connections'])
 
         for version in (12, 13):
@@ -389,6 +403,73 @@ rules:
         wait_mihomo()
         probe(True)
         print('PASS disable removes generated coupling/mount and re-enable restores it', flush=True)
+        # The shipped default inbound: TUN system stack with auto-route. The
+        # server sits behind a veth in another namespace, so the target's
+        # connection is routed into the device while Mihomo dials out directly.
+        # auto-route keeps connected subnets off the TUN, so the server's
+        # address is only reachable through the default route.
+        local, gateway, prefix, remote, host = ('198.51.100.1', '198.51.100.2', '/24', '203.0.113.2', '/32') if FAMILY == 4 else ('2001:db8:6::1', '2001:db8:6::2', '/64', '2001:db8:7::2', '/128')
+        nodad = [] if FAMILY == 4 else ['nodad']
+        call('ip', 'netns', 'add', REMOTE)
+        call('ip', 'link', 'add', 'review1', 'type', 'veth', 'peer', 'name', 'review2')
+        call('ip', 'link', 'set', 'review2', 'netns', REMOTE)
+        call('ip', '-n', REMOTE, 'link', 'set', 'lo', 'up')
+        call('ip', '-n', REMOTE, 'address', 'add', remote + host, 'dev', 'lo')
+        call('ip', '-n', REMOTE, 'address', 'add', gateway + prefix, 'dev', 'review2', *nodad)
+        call('ip', '-n', REMOTE, 'link', 'set', 'review2', 'up')
+        call('ip', 'address', 'add', local + prefix, 'dev', 'review1', *nodad)
+        call('ip', 'link', 'set', 'review1', 'up')
+        call('ip', f'-{FAMILY}', 'route', 'add', 'default', 'via', gateway, 'dev', 'review1')
+        own = os.open('/proc/self/ns/net', os.O_RDONLY)
+        theirs = os.open(f'/run/netns/{REMOTE}', os.O_RDONLY)
+        try:
+            os.setns(theirs, os.CLONE_NEWNET)
+            tun_server = socket.socket(socket.AF_INET if FAMILY == 4 else socket.AF_INET6)
+            tun_server.bind((remote, 0))
+            tun_server.listen()
+            tun_server.settimeout(5)
+        finally:
+            os.setns(own, os.CLONE_NEWNET)
+            os.close(own)
+            os.close(theirs)
+        config.write_text(config.read_text().replace('tun: {enable: false}', '''tun:
+  enable: true
+  device: Mihomo
+  stack: system
+  auto-route: true
+  auto-detect-interface: true
+  inet4-address: [198.18.0.1/30]
+  inet6-address: [fdfe:dcba:9876::1/126]'''))
+        systemctl('restart', 'mihomo.service')
+        wait_mihomo()
+        # /sys/class/net still shows the guest's devices; ask this namespace.
+        wait(lambda: call('ip', 'link', 'show', 'Mihomo', check=False).returncode == 0)
+
+        def tun_ready():
+            # Device creation precedes IPv6 DAD and the system stack's
+            # listener. Starting a socket earlier can select a source/route
+            # that bypasses the TUN even after startup finishes.
+            tun_address = '198.18.0.1' if FAMILY == 4 else 'fdfe:dcba:9876::1'
+            addresses = json.loads(call('ip', '-j', 'address', 'show', 'dev', 'Mihomo').stdout)
+            if not any(item['local'] == tun_address and not item.get('tentative') and not item.get('dadfailed')
+                       for link in addresses for item in link['addr_info']):
+                return False
+            if tun_address not in call('ss', '-H', '-ltn').stdout:
+                return False
+            routes = json.loads(call('ip', '-j', f'-{FAMILY}', 'route', 'get', remote, 'uid', '1000').stdout)
+            return routes and routes[0]['dev'] == 'Mihomo'
+
+        wait(tun_ready)
+        assert command('any-source') == 'ok'
+        assert command(f'destination {remote} {tun_server.getsockname()[1]}') == 'ok'
+        probe(True, tun_server, 'Tun')
+        tls_probe(True, 13, listener=tun_server, inbound='Tun')
+        systemctl('stop', 'mihomo-hostname-observer.service')
+        probe(False, tun_server, 'Tun')
+        systemctl('start', 'mihomo-hostname-observer.service')
+        probe(True, tun_server, 'Tun')
+        assert 'CapEff:\t0000000000001400' in Path(f'/proc/{int(systemctl("show", "-p", "MainPID", "--value", "mihomo.service").stdout)}/status').read_text()
+        print(f'PASS IPv{FAMILY} TUN system-stack named routing, completed TLS and fallback', flush=True)
         # Exit does not cause the service to attach to another numeric PID.
         client.stdin.close()
         client.wait(timeout=5)
@@ -407,6 +488,10 @@ rules:
             client.wait()
             (RUN / 'client-stderr.log').write_text(client.stderr.read())
         server.close()
+        if tun_server is not None:
+            tun_server.close()
+        if REMOTE in call('ip', 'netns', 'list').stdout:
+            call('ip', 'netns', 'delete', REMOTE)
         if cgroup.exists():
             cgroup.rmdir()
         for path in reversed(installed):
@@ -457,6 +542,7 @@ def main():
     modules = call('semodule', '-l').stdout.splitlines()
     assert not any(line.split()[0] == 'mihomo' for line in modules)
     assert NS not in call('ip', 'netns', 'list').stdout
+    assert REMOTE not in call('ip', 'netns', 'list').stdout
     guest_tcp_rmem = Path('/proc/sys/net/ipv4/tcp_rmem').read_text()
     call('ip', 'netns', 'add', NS)
     try:
