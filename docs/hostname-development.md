@@ -108,16 +108,17 @@ both peers' HTTP/2 and HPACK state, without adding a protocol parser or dependen
 to Mihomo/observer/reader. New fixture commands expose only bounded application
 byte I/O after certificate, hostname, pin and ALPN verification.
 
-Each TLS version adds four connections: a named primary, ordinary fallback while
-the observer is stopped, a new hostname selecting RENAMED after restart, and a
-wrong-pin rejection that sends no HTTP/2 preface or request. Two streams are open
-at once on both peers before any response is sent. Request DATA alternates
+Each TLS version adds five connections: a named primary, ordinary fallback while
+the observer is stopped, a new hostname selecting RENAMED after restart, a
+fresh-SNI 421 retry, and a wrong-pin rejection that sends no HTTP/2 preface or
+request. Two streams are open at once on both peers before any response is sent. Request DATA alternates
 between stream IDs; response headers and DATA arrive in reverse/interleaved
 order. Bodies and status are checked per stream. The primary survives observer
 stop with responses held pending; both the named and fallback connections open
 another pair of streams after observer restart on the same connection ID,
 chain and destination. Sixteen successful streams per TLS version cover multiplexing and reuse.
-The group adds eight TLS connections and thirty-two streams per mode/family.
+Including 421 recovery below, the group adds ten TLS connections, forty-two
+successful streams and two 421 responses per mode/family.
 This is controlled HTTP/2, not automatic browser coalescing, HTTP/2 proxying
 inside Mihomo, load testing or a general HTTP/2 conformance suite.
 
@@ -136,7 +137,19 @@ This demonstrates connection-based domain routing: a covered second HTTP origin
 shares the route chosen for the initial TLS SNI. Origin-by-origin routing would
 require separate client connections. The additional-hostname refusal belongs to
 the test client; Mihomo continues relaying end-to-end encrypted application data.
-Browser DNS, automatic coalescing decisions, ORIGIN frames and 421 recovery remain
+
+The controlled 421 case rejects only a coalesced `reuse.invalid` stream on the
+NAMED connection while its `route.invalid` sibling stays open. The client retries
+the identical POST headers/path/body on a fresh, verified TLS connection with
+SNI `reuse.invalid`; a distinct socket cookie and connection ID select RENAMED.
+The retry succeeds before the original sibling is released. That sibling then
+completes, and later streams still use the original NAMED ID/chain/destination.
+Each TLS version adds five successful streams and one deliberately misdirected
+stream to the sixteen baseline successes. The fixture explicitly drives this
+retry; no HTTP status parsing or retry policy is added to Mihomo/observer.
+[RFC 9110 section 15.5.20](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.5.20)
+permits retry after 421 over a different connection even for a non-idempotent method.
+Browser DNS, automatic coalescing/retry decisions and ORIGIN frames remain
 unproved. See [RFC 9113 section 9.1.1](https://www.rfc-editor.org/rfc/rfc9113.html#section-9.1.1).
 
 The TUN resumption group adds eleven connections per TLS version. A persistent
