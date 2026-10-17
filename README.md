@@ -1,4 +1,4 @@
-# hardened-mihomo-service
+# hardened-proxy-service
 
 A sandboxed systemd service for [mihomo](https://github.com/MetaCubeX/mihomo) in TUN mode,
 with an nftables kill switch and an SELinux policy.
