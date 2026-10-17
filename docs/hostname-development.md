@@ -116,10 +116,28 @@ between stream IDs; response headers and DATA arrive in reverse/interleaved
 order. Bodies and status are checked per stream. The primary survives observer
 stop with responses held pending; both the named and fallback connections open
 another pair of streams after observer restart on the same connection ID,
-chain and destination. Ten successful streams per TLS version cover multiplexing
-and reuse. The group adds eight TLS connections and twenty streams per mode/family.
-This is controlled same-origin HTTP/2, not browser cross-origin coalescing,
-HTTP/2 proxying inside Mihomo, load testing or a general HTTP/2 conformance suite.
+chain and destination. Sixteen successful streams per TLS version cover multiplexing and reuse.
+The group adds eight TLS connections and thirty-two streams per mode/family.
+This is controlled HTTP/2, not automatic browser coalescing, HTTP/2 proxying
+inside Mihomo, load testing or a general HTTP/2 conformance suite.
+
+Cross-origin reuse uses explicit fixture origin mappings to the same test IP
+and port. Before building HEADERS, `tls-authorize` checks each hostname against
+the already verified/pinned peer certificate's DNS SANs. Mixed-origin stream
+pairs on both existing NAMED and DIRECT connections preserve their original
+ID/chain/destination, while a fresh TLS connection for `reuse.invalid` selects
+RENAMED. The peer echoes the received authority, including the test port, and
+the client checks it independently for each response.
+An uncovered `wrong.invalid` is refused by the fixture client before any frame
+is built or sent: HTTP/2 byte count, next stream ID and peer request set
+stay unchanged. Valid requests then reuse those same stream IDs on the existing
+connection. No additional TLS connections are needed for these cases.
+This demonstrates connection-based domain routing: a covered second HTTP origin
+shares the route chosen for the initial TLS SNI. Origin-by-origin routing would
+require separate client connections. The additional-hostname refusal belongs to
+the test client; Mihomo continues relaying end-to-end encrypted application data.
+Browser DNS, automatic coalescing decisions, ORIGIN frames and 421 recovery remain
+unproved. See [RFC 9113 section 9.1.1](https://www.rfc-editor.org/rfc/rfc9113.html#section-9.1.1).
 
 The TUN resumption group adds eleven connections per TLS version. A persistent
 server context accepts saved tickets on new SSL objects and on the same object

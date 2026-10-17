@@ -15,7 +15,9 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
                 self.name = name
                 self.release = threading.Event()
                 self.two_open = threading.Event()
-                self.result = {'requests': {}, 'error': None, 'data_order': []}
+                self.result = {'requests': {}, 'authorities': {}, 'error': None, 'data_order': []}
+                self.request_hosts = {}
+                self.bytes_sent = 0
                 self.closed = False
                 if not held:
                     self.release.set()
@@ -65,7 +67,8 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
                                 for event in conn.receive_data(data):
                                     if isinstance(event, RequestReceived):
                                         headers = dict(event.headers)
-                                        assert headers[':authority'] == name, headers
+                                        assert headers[':authority'] == self.authority(self.request_hosts[event.stream_id]), headers
+                                        self.result['authorities'][event.stream_id] = headers[':authority']
                                         assert headers[':method'] == 'POST' and headers[':scheme'] == 'https', headers
                                         assert headers[':path'] == f'/stream/{event.stream_id}', headers
                                         self.result['requests'][event.stream_id] = b''
@@ -82,7 +85,8 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
                                     assert self.release.wait(15), 'response barrier timed out'
                                     # Reply out of request order and interleave DATA on both streams.
                                     for stream in reversed(pending):
-                                        conn.send_headers(stream, [(':status', '200')])
+                                        conn.send_headers(stream, [(':status', '200'),
+                                            ('x-fixture-authority', self.result['authorities'][stream])])
                                     for half in (0, 1):
                                         for stream in reversed(pending):
                                             body = f'response-{stream}'.encode()
@@ -123,11 +127,28 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
                 if data:
                     assert len(data) <= 2048, len(data)
                     assert command(f'tls-send {self.slot} {data.hex()}') == 'ok'
+                    self.bytes_sent += len(data)
 
-            def start_pair(self, streams):
+            def authority(self, hostname):
+                return f'{hostname}:{listener.getsockname()[1]}'
+
+            def start_pair(self, streams, hosts=None):
+                hosts = hosts or {stream: self.name for stream in streams}
+                # Controlled origin resolution: every candidate uses this same
+                # test IP/port. Check the already pinned peer certificate for
+                # every hostname before building even the first HEADERS frame.
+                origins = {host: listener.getsockname() for host in
+                           ('route.invalid', 'reuse.invalid', 'wrong.invalid')}
+                for host in set(hosts.values()):
+                    assert origins[host] == listener.getsockname()
+                    reply = command(f'tls-authorize {self.slot} {host}')
+                    if reply == f'tls-authorize {self.slot} hostname-failed':
+                        return False
+                    assert reply == f'tls-authorize {self.slot} ok', reply
+                self.request_hosts.update(hosts)
                 for stream in streams:
                     self.h2.send_headers(stream, [(':method', 'POST'), (':scheme', 'https'),
-                        (':authority', self.name), (':path', f'/stream/{stream}')])
+                        (':authority', self.authority(hosts[stream])), (':path', f'/stream/{stream}')])
                 for half in (0, 1):
                     for stream in streams:
                         body = f'request-{stream}'.encode()
@@ -135,6 +156,7 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
                         self.h2.send_data(stream, body[:cut] if half == 0 else body[cut:], end_stream=half == 1)
                 assert self.h2.open_outbound_streams == 2, 'client streams did not overlap'
                 self.flush()
+                return True
 
             def finish_pair(self, streams):
                 while not set(streams) <= self.ended:
@@ -142,7 +164,9 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
                     assert reply[:2] == ['tls-data', str(self.slot)], reply
                     for event in self.h2.receive_data(bytes.fromhex(reply[2])):
                         if isinstance(event, ResponseReceived):
-                            assert dict(event.headers)[':status'] == '200', event
+                            headers = dict(event.headers)
+                            assert headers[':status'] == '200', event
+                            assert headers['x-fixture-authority'] == self.authority(self.request_hosts[event.stream_id]), event
                             self.responses[event.stream_id] = b''
                         elif isinstance(event, DataReceived):
                             self.response_order.append(event.stream_id)
@@ -197,15 +221,33 @@ def run_http2_matrix(*, command, api, wait, systemctl, listener, run, pin,
             renamed.close()
             fallback.start_pair((5, 7))
             fallback.finish_pair((5, 7))
+            assert fallback.start_pair((9, 11), {9: 'route.invalid', 11: 'reuse.invalid'})
+            fallback.finish_pair((9, 11))
             fallback.close()
             primary.start_pair((5, 7))
             primary.finish_pair((5, 7))
+            assert primary.start_pair((9, 11), {9: 'route.invalid', 11: 'reuse.invalid'})
+            primary.finish_pair((9, 11))
+            sent = primary.bytes_sent
+            next_stream = primary.h2.get_next_available_stream_id()
+            received = dict(primary.result['authorities'])
+            assert not primary.start_pair((13, 15), {13: 'route.invalid', 15: 'wrong.invalid'})
+            assert primary.bytes_sent == sent and primary.h2.data_to_send() == b''
+            assert primary.h2.get_next_available_stream_id() == next_stream
+            assert primary.result['authorities'] == received
+            # Refusing an uncovered name does not poison the verified socket.
+            assert primary.start_pair((13, 15), {13: 'reuse.invalid', 15: 'reuse.invalid'})
+            primary.finish_pair((13, 15))
+            assert primary.connection['chains'] != renamed.connection['chains']
+            assert set(primary.result['authorities'].values()) == {
+                primary.authority('route.invalid'), primary.authority('reuse.invalid')}
             primary.close()
             rejected = Peer('route.invalid', 'NAMED', wrong_pin=True)
             peers.append(rejected)
             rejected.close(wrong_pin=True)
             assert rejected.result['requests'] == {}, rejected.result
-            print(f'PASS IPv{family} TLSv1.{version - 10} {inbound} HTTP/2 multiplexing, reuse and observer fallback (10 streams)', flush=True)
+            print(f'PASS IPv{family} TLSv1.{version - 10} {inbound} HTTP/2 multiplexing, reuse and observer fallback (16 streams)', flush=True)
+            print(f'PASS IPv{family} TLSv1.{version - 10} {inbound} HTTP/2 certificate-checked cross-origin reuse and uncovered-name refusal', flush=True)
         finally:
             for peer in peers:
                 peer.release.set()
