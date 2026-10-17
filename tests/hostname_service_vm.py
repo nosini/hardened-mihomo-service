@@ -6,6 +6,7 @@ client.c. Refuses existing production paths. Uses a dedicated network namespace
 and removes only its own fixtures. Never run this on a deployed machine.
 """
 import argparse
+import hashlib
 import json
 import re
 import os
@@ -14,14 +15,17 @@ import pwd
 import select
 import shutil
 import socket
+import ssl
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 
 NS = 'mihomo-hostname-review'
 RUN = None
 PACK = None
+FAMILY = 4
 
 
 def call(*args, check=True, **kw):
@@ -53,6 +57,13 @@ def api(path):
         return json.load(response)
 
 
+def wait_mihomo():
+    wait(lambda: api('/version'))
+    # The control API starts before inbound listeners. Avoid sending a SYN to
+    # a not-yet-listening REDIRECT port immediately after a service restart.
+    wait(lambda: call('ss', '-H', '-ltn', 'sport = :18661').stdout.strip())
+
+
 def inside():
     assert call('/usr/sbin/getenforce').stdout.strip() == 'Enforcing'
     call('ip', 'link', 'set', 'lo', 'up')
@@ -64,8 +75,9 @@ def inside():
     installed = []
     created_user = False
     client = None
-    server = socket.socket()
-    server.bind(('127.0.0.1', 0))
+    address = '127.0.0.1' if FAMILY == 4 else '::1'
+    server = socket.socket(socket.AF_INET if FAMILY == 4 else socket.AF_INET6)
+    server.bind((address, 0))
     server.listen()
     server.settimeout(5)
     port = server.getsockname()[1]
@@ -91,6 +103,8 @@ def inside():
         config = Path('/etc/mihomo/config.yaml')
         config.write_text('''
 redir-port: 18661
+allow-lan: true
+bind-address: '*'
 external-controller: 127.0.0.1:18662
 mode: rule
 log-level: info
@@ -141,7 +155,15 @@ rules:
             os.setgroups([])
             os.setgid(1000)
             os.setuid(1000)
-        client = subprocess.Popen(['/usr/local/bin/hostname-review-client', '4', '127.0.0.1', str(port)],
+        # Ephemeral fixture trust stays in this run directory and client only.
+        for name in ('peer', 'untrusted'):
+            call('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                 '-keyout', str(RUN / (name + '.key')), '-out', str(RUN / (name + '.pem')),
+                 '-days', '1', '-subj', '/CN=route.invalid',
+                 '-addext', 'subjectAltName=DNS:route.invalid')
+        certificate = ssl.PEM_cert_to_DER_cert((RUN / 'peer.pem').read_text())
+        pin = hashlib.sha256(certificate).hexdigest()
+        client = subprocess.Popen(['/usr/local/bin/hostname-review-client', str(FAMILY), address, str(port)],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                   text=True, preexec_fn=unprivileged)
         assert client.stdout.readline().strip() == 'ready'
@@ -154,7 +176,7 @@ rules:
                    '-libc', '/usr/lib64/libc.so.6', '-reader-user', 'mihomo', '-reader-group', 'mihomo', 'prepare']
         systemctl('daemon-reload')
         systemctl('start', 'mihomo.service')
-        wait(lambda: api('/version'))
+        wait_mihomo()
         assert systemctl('is-active', 'mihomo-hostname-observer.service', check=False).stdout.strip() == 'inactive'
         print('PASS missing registration leaves real mihomo running', flush=True)
         call(*prepare)
@@ -187,14 +209,14 @@ rules:
         print('PASS separate enforcing domains and unchanged mihomo capabilities', flush=True)
         call('nft', '-f', '-', input=f'''table inet hostname_review {{
  chain output {{ type nat hook output priority dstnat; policy accept;
- meta skuid 1000 ip daddr 127.0.0.1 tcp dport {port} redirect to :18661
+ meta skuid 1000 {'ip' if FAMILY == 4 else 'ip6'} daddr {address} tcp dport {port} redirect to :18661
  }}
 }}''')
 
         def command(text):
             client.stdin.write(text + '\n')
             client.stdin.flush()
-            ready, _, _ = select.select([client.stdout], [], [], 5)
+            ready, _, _ = select.select([client.stdout], [], [], 10)
             assert ready, text
             return client.stdout.readline().strip()
 
@@ -208,21 +230,106 @@ rules:
                 accepted.settimeout(5)
                 data = accepted.recv(4096)
                 assert data.startswith(b'\x16\x03') and b'route.invalid' in data, data
-                connection = wait(lambda: next(iter(api('/connections')['connections']), None))
+                connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
                 assert ('NAMED' in connection['chains']) == named, connection
             finally:
                 command(f'close {slot}')
                 accepted.close()
                 wait(lambda: not api('/connections')['connections'])
 
+        def tls_probe(named, version, failure=None):
+            opened = command('open route.invalid name-first fd')
+            assert opened.startswith('socket '), opened
+            slot = int(opened.split()[1])
+            trust = RUN / ('untrusted.pem' if failure == 'trust' else 'peer.pem')
+            hostname = 'wrong.invalid' if failure == 'hostname' else 'route.invalid'
+            expected_pin = '0' * 64 if failure == 'pin' else pin
+            assert command(f'verify {slot} {trust} {hostname} {expected_pin} {version}') == 'ok'
+            hello = command(f'handshake {slot}')
+            assert hello == f'handshake {slot} -1 2', hello  # WANT_READ after ClientHello
+            accepted, _ = server.accept()
+            accepted.settimeout(5)
+            connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
+            assert ('NAMED' in connection['chains']) == named, connection
+            assert connection['metadata']['destinationIP'] == address, connection
+            assert connection['metadata']['destinationPort'] == str(port), connection
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(str(RUN / 'peer.pem'), str(RUN / 'peer.key'))
+            protocol = ssl.TLSVersion.TLSv1_2 if version == 12 else ssl.TLSVersion.TLSv1_3
+            context.minimum_version = context.maximum_version = protocol
+            result = {'names': [], 'request': b'', 'error': None}
+            context.set_servername_callback(lambda _sock, name, _ctx: result['names'].append(name))
+
+            def serve():
+                try:
+                    with context.wrap_socket(accepted, server_side=True) as peer:
+                        result['version'] = peer.version()
+                        request = b'hostname-fixture-request\n'
+                        while len(result['request']) < len(request):
+                            chunk = peer.recv(len(request) - len(result['request']))
+                            if not chunk:
+                                break
+                            result['request'] += chunk
+                        if result['request']:
+                            assert result['request'] == request, result
+                            peer.sendall(b'hostname-fixture-response\n')
+                            # Keep the routed connection live for the post-TLS assertion.
+                            assert peer.recv(1) == b''
+                except Exception as error:
+                    result['error'] = error
+
+            worker = threading.Thread(target=serve, daemon=True)
+            worker.start()
+            try:
+                reply = command(f'exchange {slot}')
+                if failure in ('trust', 'hostname'):
+                    assert reply.startswith(f'exchange {slot} handshake-failed '), reply
+                    expected_error = 18 if failure == 'trust' else 62
+                    assert int(reply.split()[-1]) == expected_error, reply
+                elif failure == 'pin':
+                    assert reply == f'exchange {slot} pin-failed', reply
+                else:
+                    expected_version = 'TLSv1.2' if version == 12 else 'TLSv1.3'
+                    assert reply == f'exchange {slot} ok {expected_version}', reply
+                    assert result['request'] == b'hostname-fixture-request\n', result
+                    # Later TLS sends revoke first-send evidence, but cannot move
+                    # the already committed route or interrupt the relay.
+                    live = api('/connections')['connections']
+                    assert len(live) == 1 and live[0]['id'] == connection['id'], live
+                    assert live[0]['chains'] == connection['chains'], live
+            finally:
+                assert command(f'close {slot}') == 'ok'
+                worker.join(timeout=6)
+                accepted.close()
+            assert not worker.is_alive(), result
+            assert result['names'] == ['route.invalid'], result
+            if failure in ('trust', 'hostname'):
+                assert isinstance(result['error'], ssl.SSLError), result
+                assert result['request'] == b'', result
+            else:
+                assert result['error'] is None, result
+                if failure == 'pin':
+                    assert result['request'] == b'', result
+            wait(lambda: not api('/connections')['connections'])
+
+        for version in (12, 13):
+            tls_probe(True, version)
+            for failure in ('trust', 'hostname', 'pin'):
+                tls_probe(True, version, failure)
+        print(f'PASS IPv{FAMILY} TLS 1.2/1.3 certificate, hostname, pin and application exchange', flush=True)
+
         probe(True)
         print('PASS named routing with real destination and original ClientHello', flush=True)
         systemctl('stop', 'mihomo-hostname-observer.service')
         probe(False)
+        for version in (12, 13):
+            tls_probe(False, version)
+        print(f'PASS IPv{FAMILY} completed TLS through ordinary fallback after observer stop', flush=True)
         assert systemctl('is-active', 'killswitch.service').stdout.strip() == 'active'
         assert systemctl('is-active', 'mihomo.service').stdout.strip() == 'active'
         systemctl('start', 'mihomo-hostname-observer.service')
         probe(True)
+        tls_probe(True, 13)
         print('PASS stop fallback and fresh restart through stable endpoint mount', flush=True)
         oldpid = int(systemctl('show', '-p', 'MainPID', '--value', 'mihomo-hostname-observer.service').stdout)
         systemctl('kill', '--signal=SIGKILL', '--kill-whom=main', 'mihomo-hostname-observer.service')
@@ -230,6 +337,7 @@ rules:
         wait(lambda: systemctl('is-active', 'mihomo-hostname-observer.service', check=False).stdout.strip() == 'active')
         assert oldpid != int(systemctl('show', '-p', 'MainPID', '--value', 'mihomo-hostname-observer.service').stdout)
         probe(True)
+        tls_probe(True, 13)
         print('PASS SIGKILL cleanup, fallback and automatic fresh-instance recovery', flush=True)
         call('nft', '-a', 'list', 'table', 'inet', 'killswitch')
         # Probe blocked egress as the application user; the nft rules stay installed.
@@ -248,8 +356,11 @@ rules:
         assert 'hostname' not in generated
         systemctl('stop', 'mihomo-hostname-observer.service')
         systemctl('restart', 'mihomo.service')
-        wait(lambda: api('/version'))
+        wait_mihomo()
         probe(False)
+        for version in (12, 13):
+            tls_probe(False, version)
+        print(f'PASS IPv{FAMILY} completed TLS with hostname discovery disabled', flush=True)
         mainpid = int(systemctl('show', '-p', 'MainPID', '--value', 'mihomo.service').stdout)
         assert not Path(f'/proc/{mainpid}/root/run/mihomo-hostname').exists()
         assert 'CapEff:\t0000000000001400' in Path(f'/proc/{mainpid}/status').read_text()
@@ -258,7 +369,7 @@ rules:
         systemctl('daemon-reload')
         systemctl('reset-failed', 'mihomo-hostname-observer.service')
         systemctl('restart', 'mihomo.service')
-        wait(lambda: api('/version'))
+        wait_mihomo()
         probe(True)
         print('PASS disable removes generated coupling/mount and re-enable restores it', flush=True)
         # Exit does not cause the service to attach to another numeric PID.
@@ -277,6 +388,7 @@ rules:
             if client.poll() is None:
                 client.kill()
             client.wait()
+            (RUN / 'client-stderr.log').write_text(client.stderr.read())
         server.close()
         if cgroup.exists():
             cgroup.rmdir()
@@ -303,11 +415,13 @@ rules:
 
 
 def main():
-    global RUN, PACK
+    global RUN, PACK, FAMILY
     parser = argparse.ArgumentParser()
     parser.add_argument('run', type=Path)
     parser.add_argument('--inside', action='store_true')
+    parser.add_argument('--family', type=int, choices=(4, 6), default=4)
     args = parser.parse_args()
+    FAMILY = args.family
     RUN = args.run.resolve()
     PACK = RUN / 'packaging'
     assert os.geteuid() == 0
@@ -328,7 +442,7 @@ def main():
     assert NS not in call('ip', 'netns', 'list').stdout
     call('ip', 'netns', 'add', NS)
     try:
-        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', check=False)
+        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), check=False)
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
         assert result.returncode == 0, f'VM test failed ({result.returncode})'

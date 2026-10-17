@@ -7,8 +7,9 @@ dependency. When observation is missing or unusable, it routes normally.
 
 This is experimental. It supports one exact OpenSSL 3.5.3 x86-64-v3/library profile,
 a sole first TCP write of at most 4096 bytes and 256 socket guards per observer
-instance. It does not support browser ECH, QUIC, broad application discovery or
-completed-TLS validation. The current Mihomo hook handles real-IP TCP REDIRECT
+instance. Controlled TLS 1.2/1.3 certificate/hostname verification, certificate
+pinning and application exchange pass for IPv4/IPv6; browser ECH, QUIC and broad
+application discovery remain unsupported. The current Mihomo hook handles real-IP TCP REDIRECT
 traffic only: enabling it in the default TUN-only configuration adds no names to
 TUN flows. This package does not change interception, DNS, TUN or firewall rules.
 See the [observer requirements](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/experiments/hostname/OBSERVER.md)
