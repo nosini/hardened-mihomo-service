@@ -292,6 +292,14 @@ sudo systemctl stop socketowner.service
 sudo systemctl restart mihomo.service
 ```
 
+## Optional hostname discovery
+
+An experimental [hostname observer](docs/hostname-discovery.md) can supply names
+for supported real-IP TCP REDIRECT flows, independently of process lookup. It
+uses a separate optional binary and root-private target registration. It is
+disabled by default, and does not add coverage to the default TUN-only setup.
+Observer failure leaves ordinary Mihomo routing and network protection running.
+
 ## Updating
 
 Version 1.8 renames the loader from `mihomo-sockowner` to `socketowner`, along with its

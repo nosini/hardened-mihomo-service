@@ -5,3 +5,8 @@
 /etc/mihomo/ruleset(/.*)?     gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/cache\.db    --   gen_context(system_u:object_r:mihomo_data_t,s0)
 /etc/mihomo/geoip\.metadb --  gen_context(system_u:object_r:mihomo_data_t,s0)
+
+/usr/bin/mihomo-hostname-observer -- gen_context(system_u:object_r:mihomo_hostname_exec_t,s0)
+/run/mihomo-hostname(/.*)? gen_context(system_u:object_r:mihomo_hostname_runtime_t,s0)
+/run/mihomo-hostname/state(/.*)? gen_context(system_u:object_r:mihomo_hostname_state_t,s0)
+/run/mihomo-hostname-target(/.*)? gen_context(system_u:object_r:mihomo_hostname_target_t,s0)

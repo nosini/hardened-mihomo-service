@@ -1,4 +1,4 @@
-policy_module(mihomo, 1.8)
+policy_module(mihomo, 1.9)
 
 type mihomo_t;
 type mihomo_exec_t;
@@ -155,3 +155,71 @@ allow mihomo_t self:udp_socket getopt;
 fs_list_bpf_dirs(mihomo_t)
 allow mihomo_t bpf_t:file { getattr read };
 allow mihomo_t socketowner_t:bpf map_read;
+
+
+########################################
+# Optional hostname observer. Programs/maps have a separate creating domain;
+# the TCP proxy only receives read-only, frozen map FDs through the endpoint.
+
+type mihomo_hostname_t;
+type mihomo_hostname_exec_t;
+init_daemon_domain(mihomo_hostname_t, mihomo_hostname_exec_t)
+type mihomo_hostname_runtime_t;
+type mihomo_hostname_state_t;
+type mihomo_hostname_target_t;
+files_pid_file(mihomo_hostname_runtime_t)
+files_pid_file(mihomo_hostname_state_t)
+files_pid_file(mihomo_hostname_target_t)
+
+allow mihomo_hostname_t self:capability { chown net_admin sys_ptrace };
+allow mihomo_hostname_t self:capability2 { bpf perfmon };
+allow mihomo_hostname_t self:bpf { map_create map_read map_write prog_load prog_run };
+dev_read_sysfs(mihomo_hostname_t)
+fs_list_cgroup_dirs(mihomo_hostname_t)
+fs_getattr_cgroup(mihomo_hostname_t)
+dontaudit mihomo_hostname_t cgroup_t:file { open read };
+allow mihomo_hostname_t bpf_t:filesystem getattr;
+fs_manage_bpf_dirs(mihomo_hostname_t)
+fs_manage_bpf_files(mihomo_hostname_t)
+# Hash only installed profile libraries, not user-home files.
+libs_read_lib_files(mihomo_hostname_t)
+# Library mappings/cgroup and the observer's own pidfd/fdinfo. No process ptrace
+# permission is granted; direct ptrace/process_vm syscalls are also filtered.
+allow mihomo_hostname_t domain:dir { getattr search };
+allow mihomo_hostname_t domain:file { getattr open read };
+allow mihomo_hostname_t self:dir list_dir_perms;
+allow mihomo_hostname_t self:lnk_file read_lnk_file_perms;
+kernel_read_system_state(mihomo_hostname_t)
+kernel_read_kernel_sysctls(mihomo_hostname_t)
+fs_getattr_nsfs_files(mihomo_hostname_t)
+fs_getattr_pidfs(mihomo_hostname_t)
+
+files_search_pids(mihomo_hostname_t)
+allow mihomo_hostname_t mihomo_hostname_target_t:dir search_dir_perms;
+allow mihomo_hostname_t mihomo_hostname_target_t:file read_file_perms;
+manage_dirs_pattern(mihomo_hostname_t, mihomo_hostname_runtime_t, mihomo_hostname_runtime_t)
+manage_sock_files_pattern(mihomo_hostname_t, mihomo_hostname_runtime_t, mihomo_hostname_runtime_t)
+allow mihomo_hostname_t mihomo_hostname_runtime_t:dir setattr;
+allow mihomo_hostname_t mihomo_hostname_runtime_t:sock_file setattr;
+manage_dirs_pattern(mihomo_hostname_t, mihomo_hostname_state_t, mihomo_hostname_state_t)
+manage_files_pattern(mihomo_hostname_t, mihomo_hostname_state_t, mihomo_hostname_state_t)
+allow mihomo_hostname_t mihomo_hostname_runtime_t:dir { add_name remove_name };
+filetrans_pattern(mihomo_hostname_t, mihomo_hostname_runtime_t, mihomo_hostname_state_t, dir, "state")
+allow mihomo_hostname_t self:unix_stream_socket create_stream_socket_perms;
+allow mihomo_hostname_t self:unix_dgram_socket create_socket_perms;
+init_dgram_send(mihomo_hostname_t)
+# systemd uses a kernel-labeled notification proxy for private-network units.
+kernel_dgram_send(mihomo_hostname_t)
+allow mihomo_hostname_t sysctl_net_t:dir search;
+allow mihomo_hostname_t sysctl_net_t:file read_file_perms;
+
+# No new capability, process visibility, filesystem write or program-loading
+# grant for mihomo. Its generated mount exposes only the bootstrap directory.
+fs_getattr_pidfs(mihomo_t)
+files_search_pids(mihomo_t)
+allow mihomo_t mihomo_hostname_runtime_t:dir { getattr search };
+allow mihomo_t mihomo_hostname_runtime_t:sock_file { getattr write };
+allow mihomo_t self:unix_stream_socket create_stream_socket_perms;
+allow mihomo_t mihomo_hostname_t:unix_stream_socket connectto;
+allow mihomo_t mihomo_hostname_t:fd use;
+allow mihomo_t mihomo_hostname_t:bpf map_read;

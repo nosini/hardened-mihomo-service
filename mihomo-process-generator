@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""Select mihomo's process-lookup sandbox from its existing YAML settings."""
+"""Select optional lookup services and mihomo's sandbox from YAML settings."""
 
 from pathlib import Path
 import re
@@ -94,11 +94,42 @@ def top_level(root, yaml):
     return found
 
 
-def lookup_mode(filename):
-    root, yaml = compose(filename)
-    if root is None:
-        raise ValueError("configuration must be a mapping")
-    found = top_level(root, yaml)
+def boolean(node, name):
+    if node is None or node.tag == NULL:
+        return False
+    if node.tag == BOOL and node.value in BOOLEANS:
+        return BOOLEANS[node.value]
+    if node.tag == STR and node.value in LEGACY_BOOLEANS:
+        return LEGACY_BOOLEANS[node.value]
+    raise ValueError(f"{name} must be a boolean")
+
+
+def hostname_dropin(found, yaml):
+    node = found.get("hostname-discovery")
+    if node is None or node.tag == NULL:
+        return ""
+    settings = top_level(node, yaml)
+    if not boolean(settings.get("enable"), "hostname-discovery.enable"):
+        return ""
+    endpoint = settings.get("endpoint")
+    if endpoint is None or endpoint.value != "/run/mihomo-hostname/bootstrap.sock":
+        raise ValueError("hostname-discovery requires the service's endpoint")
+    return (
+        "[Unit]\nWants=mihomo-hostname-observer.service\n"
+        # No Requires/BindsTo/PartOf: failure must never stop network protection.
+        "After=mihomo-hostname-observer.service\n"
+        "\n[Service]\n"
+        # Optional so a missing installation does not prevent ordinary routing.
+        # tmpfiles supplies a stable root-owned directory for restart visibility.
+        "BindReadOnlyPaths=-/run/mihomo-hostname\n"
+        "InaccessiblePaths=-/sys/fs/bpf/mihomo-hostname\n"
+    )
+
+
+def lookup_mode(filename, found=None, yaml=None):
+    if found is None:
+        root, yaml = compose(filename)
+        found = top_level(root, yaml)
 
     def scalar(name):
         # Null leaves mihomo's default in place.
@@ -115,15 +146,7 @@ def lookup_mode(filename):
     if process_mode not in ("off", "strict", "always"):
         raise ValueError("invalid find-process-mode")
 
-    node = scalar("find-process-bpf-only")
-    if node is None:
-        only = False
-    elif node.tag == BOOL and node.value in BOOLEANS:
-        only = BOOLEANS[node.value]
-    elif node.tag == STR and node.value in LEGACY_BOOLEANS:
-        only = LEGACY_BOOLEANS[node.value]
-    else:
-        raise ValueError("find-process-bpf-only must be a boolean")
+    only = boolean(scalar("find-process-bpf-only"), "find-process-bpf-only")
 
     node = scalar("find-process-bpf-map")
     bpf_map = DEFAULT_MAP if node is None else node.value
@@ -168,12 +191,15 @@ def generate(output, config=CONFIG):
     target = directory / "50-process-lookup.conf"
     target.write_text(DENY)
     try:
-        contents = dropin(lookup_mode(config))
+        root, yaml = compose(config)
+        found = top_level(root, yaml)
+        contents = dropin(lookup_mode(config, found, yaml))
+        contents += "\n" + hostname_dropin(found, yaml)
     except Exception:
         # YAML errors can include credentials from the offending line. Log no
         # configuration contents, and do not grant access on a parsing failure.
         print("mihomo-process-generator: cannot read lookup settings from "
-              "/etc/mihomo/config.yaml; check YAML, lookup settings and PyYAML; "
+              "/etc/mihomo/config.yaml; check YAML, process/hostname settings and PyYAML; "
               "mihomo startup is blocked", file=sys.stderr)
         return 1
     target.write_text(contents)

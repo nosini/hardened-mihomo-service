@@ -1,0 +1,67 @@
+# Hostname service development
+
+Run the generator checks in this checkout:
+
+```sh
+python3 -m unittest discover -s tests -v
+```
+
+They cover all three process modes, independent hostname enablement, nested
+aliases/merges, boolean defaults and malformed settings. Bad configuration
+leaves a deny-start drop-in without logging configuration contents.
+
+Build the SELinux module with the distribution's development policy and check
+units with `systemd-analyze verify`. The optional observer uses its own domain,
+runtime/state/registration types and BPF map-creation label. The reader receives
+Unix-socket, transferred-FD, read-only map and pidfs metadata permissions. Tests
+must verify the actual running contexts, not only successful starts.
+
+## Disposable VM integration
+
+`tests/hostname_service_vm.py` requires root, systemd, enforcing SELinux, the
+SELinux development package, Python/PyYAML, gcc/OpenSSL headers, iproute2 and
+nftables. Use a disposable Linux amd64 VM with the observer's exact verified
+libraries, BPF LSM, cgroup v2 and bpffs. Do not run it on a deployed machine.
+It refuses existing Mihomo units, binaries, config, runtime/pin directories and
+policy module rather than replacing them.
+
+Prepare a run directory with:
+
+- `packaging/`: this repository's files (without its .git directory).
+- `mihomo`: a static (`CGO_ENABLED=0`) optional-reader Mihomo build with
+  `hostname_discovery`, suitable for the unit's empty root.
+- `mihomo-hostname-observer`: the independent observer build including registration.
+- `client.c`: socketowner's controlled OpenSSL fixture from
+  `experiments/hostname/testdata/client.c`.
+
+Run, keeping logs in that directory:
+
+```sh
+sudo python3 tests/hostname_service_vm.py /absolute/path/to/run
+```
+
+The harness compiles/loads the shipped policy, temporarily installs the binaries,
+units and actual generator, and selects a dedicated network namespace for Mihomo
+and the shipped kill switch. Its target runs as UID 1000; the observer uses the
+shipped private-network unit. `nsenter` changes only the harness's network
+namespace, preserving the VM's selinuxfs mount for enforcing-state checks.
+The fixture omits the unrelated network-online dependency and external kill-switch
+include, enables a controlled REDIRECT listener with sniffing/DNS/TUN off, and
+adds only a target-specific local REDIRECT rule. It does not modify guest uplinks
+or an existing network-protection service.
+
+Checks include a stale registration with ordinary Mihomo startup; actual
+`mihomo_t`/`mihomo_hostname_t` execution; the base Mihomo capability set; private
+registration absent and hostname pins masked in the reader's root; a DOMAIN-selected chain
+with original destination and ClientHello relay; ordinary fallback after stop
+and crash; restart visibility through the same endpoint-directory bind; fresh
+maps after automatic recovery; target exit/stale restart; disable/re-enable without extra capabilities, no runtime SELinux denials, and a counted
+non-loopback application packet dropped by the shipped kill switch. The fixture
+peer stops at ClientHello, so this does not prove completed TLS or application
+traffic. It collects service journals before removing its own fixtures and policy.
+
+Socketowner's separate tagged VM suite covers journal ownership, pidfd/boot/PID
+namespace identity rejection, malformed registrations, and the existing
+publication, lifetime, bootstrap and routing matrices. Run it after changes to
+observer initialization or link ownership, using a temporary three-module Go
+workspace containing socketowner, socketowner/hostname and Mihomo.

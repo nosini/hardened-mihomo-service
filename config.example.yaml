@@ -21,6 +21,13 @@ find-process-mode: always
 # find-process-bpf-only to false; the generator grants the required access.
 find-process-bpf-map: /run/mihomo-bpf/conn_owners
 find-process-bpf-only: true
+# Optional experimental hostname discovery for supported TCP REDIRECT flows.
+# This does not add hostname evidence to TUN flows. See docs/hostname-discovery.md
+# for the separate observer, target registration and optional-reader Mihomo build.
+hostname-discovery:
+  enable: false
+  endpoint: /run/mihomo-hostname/bootstrap.sock
+  wait-ms: 50
 # Pick a port SELinux labels unreserved_port_t; the usual 9090 is websm_port_t.
 # external-controller: 127.0.0.1:9097
 

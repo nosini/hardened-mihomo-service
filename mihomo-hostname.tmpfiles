@@ -1,0 +1,6 @@
+# Stable directory inode: mihomo binds this once; replacing the socket inside
+# remains visible after observer restart. State and pins are root-private.
+d /run/mihomo-hostname         0755 root root -
+d /run/mihomo-hostname/state   0700 root root -
+d /run/mihomo-hostname-target  0700 root root -
+d /sys/fs/bpf/mihomo-hostname  0700 root root -
