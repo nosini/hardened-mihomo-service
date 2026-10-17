@@ -6,8 +6,8 @@ reader. Mihomo keeps its existing capabilities, process visibility and kill-swit
 dependency. When observation is missing or unusable, it routes normally.
 
 This is experimental. It supports one exact OpenSSL 3.5.3 x86-64-v3/library profile,
-a sole first TCP write of at most 4096 bytes and 256 socket guards per observer
-instance. Controlled TLS 1.2/1.3 certificate/hostname verification, certificate
+a sole first TCP write of at most 4096 bytes and 256 concurrently retained socket
+guards per observer instance; final release reclaims slots. Controlled TLS 1.2/1.3 certificate/hostname verification, certificate
 pinning and application exchange pass for IPv4/IPv6; browser ECH, QUIC and broad
 application discovery remain unsupported. The current Mihomo hook handles real-IP TCP REDIRECT
 traffic only: enabling it in the default TUN-only configuration adds no names to
@@ -21,7 +21,9 @@ Install a static (`CGO_ENABLED=0`) optional-reader Mihomo build and the independ
 socketowner. Both are opt-in builds; replacing ordinary Mihomo does not install
 or update the privileged observer. No reader release is published yet; source
 build instructions are in the respective repositories. The observer binary must
-include `prepare` and `run-registered`.
+include `prepare` and `run-registered`. Rebuild both the observer and optional
+Mihomo reader consumer when upgrading to hostname contract profile 2; old
+profile-1 binaries cannot bootstrap the reclaiming observer.
 
 After installing the regular hardened service, build and install the updated
 SELinux module and optional files from this checkout:
