@@ -49,7 +49,9 @@ namespace, preserving the VM's selinuxfs mount for enforcing-state checks.
 The fixture omits the unrelated network-online dependency and external kill-switch
 include, enables a controlled dual-stack REDIRECT listener with sniffing/DNS/TUN
 off, and adds only a target-specific local REDIRECT rule. It does not modify guest uplinks
-or an existing network-protection service.
+or an existing network-protection service. Only the fixture network namespace
+uses reduced TCP receive-buffer defaults to force nonblocking ClientHello
+retries; the harness checks that the guest defaults remain unchanged.
 
 Checks include a stale registration with ordinary Mihomo startup; actual
 `mihomo_t`/`mihomo_hostname_t` execution; the base Mihomo capability set; private
@@ -64,11 +66,14 @@ The full-TLS matrix also fixes TLS 1.2/1.3, verifies the peer certificate and
 hostname with a client-only test trust store, checks a SHA-256 certificate pin,
 and exchanges known application bytes in both directions. Untrusted certificates,
 wrong hostnames and wrong pins must fail without delivering application data.
-Each family runs fourteen TLS cases: eight successful exchanges (enabled,
-observer stopped, restarted, recovered after SIGKILL, and disabled) and six
-intentional rejections. After the handshake and application exchange, the same
-connection ID and chain must remain live despite later sends revoking first-send
-discovery authority. The peer checks the unchanged SNI, and the API confirms the
+Each family runs eighteen TLS cases: twelve successful exchanges (including
+large ClientHellos, actual short-write retries, observer stop/restart, recovery
+after SIGKILL and feature disablement) and six intentional rejections. Both TLS
+versions exercise a ClientHello above 4 KiB and a pending write that starts with
+`SSL_ERROR_WANT_WRITE`, then completes through the real redirect listener. After
+the handshake and application exchange, the same connection ID and chain must
+remain live despite unsupported later sends revoking initial-window discovery
+authority. The peer checks the unchanged SNI, and the API confirms the
 original destination IP/port.
 
 Run both family selections sequentially; they use the same temporary service

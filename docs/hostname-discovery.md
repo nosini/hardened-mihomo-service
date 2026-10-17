@@ -6,14 +6,15 @@ reader. Mihomo keeps its existing capabilities, process visibility and kill-swit
 dependency. When observation is missing or unusable, it routes normally.
 
 This is experimental. It supports one exact OpenSSL 3.5.3 x86-64-v3/library profile,
-a sole first TCP write of at most 4096 bytes and 256 concurrently retained socket
-guards per observer instance; final release reclaims slots. Controlled TLS 1.2/1.3 certificate/hostname verification, certificate
-pinning and application exchange pass for IPv4/IPv6; browser ECH, QUIC and broad
-application discovery remain unsupported. The current Mihomo hook handles real-IP TCP REDIRECT
-traffic only: enabling it in the default TUN-only configuration adds no names to
+one initial ClientHello record of at most 16 KiB with verified same-SSL/name
+retries inside its remaining bytes, and 256 concurrently retained socket guards
+per observer instance; final release reclaims slots. Controlled TLS 1.2/1.3
+certificate/hostname verification, certificate pinning and application exchange
+pass for IPv4/IPv6; browser ECH, QUIC and broad application discovery remain
+unsupported. The current Mihomo hook handles real-IP TCP REDIRECT traffic only: enabling it in the default TUN-only configuration adds no names to
 TUN flows. This package does not change interception, DNS, TUN or firewall rules.
 See the [observer requirements](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/experiments/hostname/OBSERVER.md)
-and [reader contract](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/hostname/CONTRACT.md).
+and [reader contract](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/hostname/PROFILE3.md).
 
 ## Installing
 
@@ -22,8 +23,8 @@ socketowner. Both are opt-in builds; replacing ordinary Mihomo does not install
 or update the privileged observer. No reader release is published yet; source
 build instructions are in the respective repositories. The observer binary must
 include `prepare` and `run-registered`. Rebuild both the observer and optional
-Mihomo reader consumer when upgrading to hostname contract profile 2; old
-profile-1 binaries cannot bootstrap the reclaiming observer.
+Mihomo reader consumer when upgrading to hostname contract profile 3;
+profile-1/profile-2 binaries cannot bootstrap this observer.
 
 After installing the regular hardened service, build and install the updated
 SELinux module and optional files from this checkout:

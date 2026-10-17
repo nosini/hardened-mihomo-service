@@ -67,6 +67,9 @@ def wait_mihomo():
 def inside():
     assert call('/usr/sbin/getenforce').stdout.strip() == 'Enforcing'
     call('ip', 'link', 'set', 'lo', 'up')
+    # This fixture-owned netns uses small receive windows to force actual
+    # nonblocking retries through the real redirect listener.
+    Path('/proc/sys/net/ipv4/tcp_rmem').write_text('4096 4096 4096\n')
     # An isolated non-loopback path proves the shipped kill-switch output drop
     # survives observer failure. It has no route to the guest or the LAN.
     call('ip', 'link', 'add', 'review0', 'type', 'dummy')
@@ -237,16 +240,26 @@ rules:
                 accepted.close()
                 wait(lambda: not api('/connections')['connections'])
 
-        def tls_probe(named, version, failure=None):
+        def tls_probe(named, version, failure=None, window=None):
+            if window == 'retry':
+                assert command('tiny-send') == 'ok'
             opened = command('open route.invalid name-first fd')
             assert opened.startswith('socket '), opened
             slot = int(opened.split()[1])
+            if window == 'retry':
+                assert command('normal-send') == 'ok'
             trust = RUN / ('untrusted.pem' if failure == 'trust' else 'peer.pem')
             hostname = 'wrong.invalid' if failure == 'hostname' else 'route.invalid'
             expected_pin = '0' * 64 if failure == 'pin' else pin
             assert command(f'verify {slot} {trust} {hostname} {expected_pin} {version}') == 'ok'
+            if window:
+                shape = 'retry-alpn' if window == 'retry' else 'large-alpn'
+                assert command(f'{shape} {slot}') == 'ok'
             hello = command(f'handshake {slot}')
-            assert hello == f'handshake {slot} -1 2', hello  # WANT_READ after ClientHello
+            expected_error = 3 if window == 'retry' else 2
+            assert hello == f'handshake {slot} -1 {expected_error}', hello
+            # WANT_WRITE proves the live TLS exchange begins with a pending
+            # nonblocking write, then exchange must drain it through TLS.
             accepted, _ = server.accept()
             accepted.settimeout(5)
             connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
@@ -312,6 +325,10 @@ rules:
                     assert result['request'] == b'', result
             wait(lambda: not api('/connections')['connections'])
 
+        for version in (12, 13):
+            for window in ('large', 'retry'):
+                tls_probe(True, version, window=window)
+        print(f'PASS IPv{FAMILY} large ClientHello and short-write TLS 1.2/1.3', flush=True)
         for version in (12, 13):
             tls_probe(True, version)
             for failure in ('trust', 'hostname', 'pin'):
@@ -440,6 +457,7 @@ def main():
     modules = call('semodule', '-l').stdout.splitlines()
     assert not any(line.split()[0] == 'mihomo' for line in modules)
     assert NS not in call('ip', 'netns', 'list').stdout
+    guest_tcp_rmem = Path('/proc/sys/net/ipv4/tcp_rmem').read_text()
     call('ip', 'netns', 'add', NS)
     try:
         result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), check=False)
@@ -448,6 +466,7 @@ def main():
         assert result.returncode == 0, f'VM test failed ({result.returncode})'
     finally:
         call('ip', 'netns', 'delete', NS)
+        assert Path('/proc/sys/net/ipv4/tcp_rmem').read_text() == guest_tcp_rmem
 
 
 if __name__ == '__main__':
