@@ -38,8 +38,8 @@ class GeneratorTests(unittest.TestCase):
             "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"
         )
         self.assertEqual(status, 0, errors)
-        self.assertIn("Requires=mihomo-sockowner.service", unit)
-        self.assertIn("After=mihomo-sockowner.service", unit)
+        self.assertIn("Requires=socketowner.service", unit)
+        self.assertIn("After=socketowner.service", unit)
         self.assertIn("BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
         self.assertNotIn("SYS_PTRACE", unit)
         self.assertNotIn("ProtectProc=default", unit)
@@ -53,7 +53,7 @@ class GeneratorTests(unittest.TestCase):
             self.assertIn(f"{directive}=\n{directive}=CAP_NET_ADMIN CAP_NET_BIND_SERVICE "
                           "CAP_SYS_PTRACE CAP_DAC_READ_SEARCH", unit)
         self.assertNotIn("Requires=", unit)
-        self.assertIn("Wants=mihomo-sockowner.service", unit)
+        self.assertIn("Wants=socketowner.service", unit)
         self.assertIn("BindReadOnlyPaths=-/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf", unit)
 
     def test_defaults_match_mihomo(self):
@@ -68,7 +68,7 @@ class GeneratorTests(unittest.TestCase):
                 self.assertEqual(status, 0, errors)
                 self.assertNotIn("SYS_PTRACE", unit)
                 self.assertNotIn("BindReadOnlyPaths", unit)
-                self.assertNotIn("mihomo-sockowner", unit)
+                self.assertNotIn("socketowner", unit)
 
     def test_yaml_comments_nested_settings_aliases_and_merges(self):
         status, unit, errors = self.generate(
@@ -79,7 +79,7 @@ class GeneratorTests(unittest.TestCase):
             "proxies:\n  - name: example\n    find-process-mode: off\n"
         )
         self.assertEqual(status, 0, errors)
-        self.assertIn("Requires=mihomo-sockowner.service", unit)
+        self.assertIn("Requires=socketowner.service", unit)
 
     def test_merges_follow_mihomo_precedence(self):
         bpf = "find-process-bpf-map: /run/mihomo-bpf/conn_owners\n"

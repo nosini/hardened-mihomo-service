@@ -7,17 +7,17 @@ with an nftables kill switch and an SELinux policy.
   Only `/usr`, the trust stores and `/etc/mihomo` are visible. Of those, only `ruleset/`,
   `cache.db` and `geoip.metadb` are writable. `/etc/hosts` and `/etc/resolv.conf` are not,
   so configure mihomo's DNS servers explicitly. In BPF-only mode, other users' processes
-  are hidden; it learns which process owns a connection from mihomo-sockowner.
+  are hidden; it learns which process owns a connection from socketowner.
 - `killswitch.service` loads `nftables-killswitch.conf` before the network comes up. It
   drops anything that doesn't go through the TUN device, except mihomo's own sockets and
   the local addresses you allow in `/etc/nftables-killswitch.d/`. If mihomo stops, nothing
   leaks. If the rules fail to load, everything but loopback stays blocked.
-- `mihomo-sockowner.service` attaches small BPF programs that record which process opened
+- `socketowner.service` attaches small BPF programs that record which process opened
   each connection and which program each process runs, for `PROCESS-NAME` and
   `PROCESS-PATH` rules. It needs the kernel's BPF LSM; see
   [Process lookup](#process-lookup).
 - `mihomo.te`, `mihomo.fc` and `mihomo.if` confine mihomo to `mihomo_t`, and
-  mihomo-sockowner to `mihomo_sockowner_t`.
+  socketowner to `socketowner_t`.
 - `mihomo-v6-direct.service` and its two scripts are optional. They add source-based routing
   rules so that mihomo's direct IPv6 connections from the uplink's own prefixes use the main
   routing table instead of looping back into the TUN. The rules follow prefix changes.
@@ -93,7 +93,7 @@ mounts file systems other than `/` and `/usr`, and `/usr/local` is often one of 
 btrfs subvolume on openSUSE). Without the generator, mihomo doesn't start.
 
 The example uses BPF-only process lookup. Before starting mihomo, install
-mihomo-sockowner as described in [Process lookup](#process-lookup), or set
+socketowner as described in [Process lookup](#process-lookup), or set
 `find-process-mode: off` in `config.yaml` if you don't use process rules. Then start and
 enable the services:
 
@@ -135,8 +135,8 @@ drop-in for `mihomo.service`:
 | YAML settings | Service settings |
 | --- | --- |
 | `find-process-mode: off` | Other users' processes hidden; no BPF maps or inspection capabilities |
-| `find-process-bpf-only: true` with matching enabled | Other users' processes hidden; requires mihomo-sockowner and its maps |
-| `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; starts mihomo-sockowner, whose maps are optional |
+| `find-process-bpf-only: true` with matching enabled | Other users' processes hidden; requires socketowner and its maps |
+| `find-process-bpf-only: false` with matching enabled | Processes visible; adds `CAP_SYS_PTRACE` and `CAP_DAC_READ_SEARCH`; starts socketowner, whose maps are optional |
 
 Matching is enabled with `always` or `strict` (mihomo's default). If
 `find-process-bpf-only` is absent or false, mihomo permits `/proc` fallback. It still
@@ -169,9 +169,9 @@ missing, Python/PyYAML is unavailable, or the lookup settings cannot be read, mi
 fails to start. The generator supports plaintext YAML, including anchors and merges;
 BPF-only mode requires `find-process-bpf-map: /run/mihomo-bpf/conn_owners`.
 
-### With mihomo-sockowner
+### With socketowner
 
-`mihomo-sockowner.service` attaches BPF programs that record the process behind each TCP
+`socketowner.service` attaches BPF programs that record the process behind each TCP
 and UDP connection and the program each process runs. mihomo reads both from tables that
 `mihomo.service` binds into its sandbox read-only; process lookup never reads `/proc`.
 The tables keep an entry after its connection closes and after its process exits, so a short UDP
@@ -196,15 +196,15 @@ loaded, and the loader has no network access and takes no input but its command 
 return, mihomo, which handles network traffic and serves its API, needs no capabilities
 and no access to other processes for this.
 
-Install `mihomo-sockowner` separately from the
+Install `socketowner` separately from the
 [socketowner repository](https://github.com/nosini/socketowner). It is no longer
 part of the mihomo source or build. To build it with Go 1.25 or newer, run these
 commands from a socketowner checkout:
 
 ```sh
-CGO_ENABLED=0 go build -o mihomo-sockowner .
-sudo install -m 755 mihomo-sockowner /usr/local/bin/mihomo-sockowner
-sudo restorecon -v /usr/local/bin/mihomo-sockowner
+CGO_ENABLED=0 go build -o socketowner .
+sudo install -m 755 socketowner /usr/local/bin/socketowner
+sudo restorecon -v /usr/local/bin/socketowner
 ```
 
 The loader and mihomo use [map interface v1](https://github.com/nosini/socketowner/blob/main/docs/map-interface.md).
@@ -213,7 +213,7 @@ from the loader formerly included in mihomo, install this loader and restart it
 before starting the updated mihomo:
 
 ```sh
-sudo systemctl restart mihomo-sockowner.service
+sudo systemctl restart socketowner.service
 ```
 
 Keep loader installation and updates separate from mihomo updates; replacing
@@ -223,15 +223,15 @@ Then install the unit and restart mihomo. The generator starts the loader with m
 whenever process lookup is on, so it needs no enabling:
 
 ```sh
-sudo install -m 644 mihomo-sockowner.service /etc/systemd/system/
+sudo install -m 644 socketowner.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
 
 In BPF-only mode, mihomo requires it. Otherwise process rules would silently stop matching
 whenever the programs aren't attached. If they fail to attach, mihomo doesn't start, and
-`sudo journalctl -u mihomo-sockowner.service` shows why. Restarting or stopping
-mihomo-sockowner restarts or stops mihomo too. In `/proc` mode, mihomo starts even if the
+`sudo journalctl -u socketowner.service` shows why. Restarting or stopping
+socketowner restarts or stops mihomo too. In `/proc` mode, mihomo starts even if the
 loader fails, and searches `/proc` instead.
 
 `config.example.yaml` already points `find-process-bpf-map` at the tables and sets
@@ -240,7 +240,7 @@ shows "Using socket owners and executables recorded in /run/mihomo-bpf".
 
 Some processes can't be named:
 
-- Connections opened before mihomo-sockowner started. Processes that were already running
+- Connections opened before socketowner started. Processes that were already running
   are filled in when it starts, but their earlier connections aren't.
 - Programs whose path is longer than 1024 bytes.
 - A process in a plain `chroot` is named by its path inside the chroot. Containers and
@@ -264,7 +264,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
 
-The generator starts mihomo-sockowner in this mode too. Without the BPF LSM it can still
+The generator starts socketowner in this mode too. Without the BPF LSM it can still
 record which process owns each connection, though not what each process runs. That keeps
 short UDP exchanges matching their rules while the process runs; mihomo then reads the
 path from `/proc`. Without it, though, a connected socket that one process hands
@@ -272,27 +272,56 @@ to another is still credited to the first. Install it as above and run it withou
 `-exec-paths`:
 
 ```sh
-sudo mkdir -p /etc/systemd/system/mihomo-sockowner.service.d
+sudo mkdir -p /etc/systemd/system/socketowner.service.d
 printf '%s\n' '[Service]' 'ExecStart=' \
-    'ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo attach' |
-    sudo tee /etc/systemd/system/mihomo-sockowner.service.d/no-exec-paths.conf
+    'ExecStart=/usr/local/bin/socketowner -reader-group mihomo attach' |
+    sudo tee /etc/systemd/system/socketowner.service.d/no-exec-paths.conf
 sudo systemctl daemon-reload
-sudo systemctl restart mihomo-sockowner.service
+sudo systemctl restart socketowner.service
 sudo systemctl restart mihomo.service
 ```
 
 ### Turning it off
 
 If you don't use these rules, set `find-process-mode: off` in `config.yaml`. mihomo then
-no longer starts mihomo-sockowner. Reload first so stopping the loader doesn't stop mihomo:
+no longer starts socketowner. Reload first so stopping the loader doesn't stop mihomo:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl stop mihomo-sockowner.service
+sudo systemctl stop socketowner.service
 sudo systemctl restart mihomo.service
 ```
 
 ## Updating
+
+Version 1.8 renames the loader from `mihomo-sockowner` to `socketowner`, along with its
+unit and SELinux types. Stop mihomo and the old loader, remove both old files, then build
+and install the renamed loader from a socketowner checkout. The kill switch keeps
+blocking traffic while mihomo is stopped:
+
+```sh
+sudo systemctl stop mihomo.service mihomo-sockowner.service
+sudo rm /etc/systemd/system/mihomo-sockowner.service /usr/local/bin/mihomo-sockowner
+CGO_ENABLED=0 go build -o socketowner .
+sudo install -m 755 socketowner /usr/local/bin/socketowner
+```
+
+Then, from this repository, load the policy, label the new binary and install the units:
+
+```sh
+make -f /usr/share/selinux/devel/Makefile mihomo.pp
+sudo semodule -i mihomo.pp
+sudo restorecon -v /usr/local/bin/socketowner
+sudo install -m 644 mihomo.service socketowner.service /etc/systemd/system/
+sudo install -D -m 755 mihomo-process-generator \
+    /etc/systemd/system-generators/mihomo-process-generator
+sudo systemctl daemon-reload
+sudo systemctl start mihomo.service
+```
+
+If you created the `no-exec-paths.conf` loader drop-in, remove
+`/etc/systemd/system/mihomo-sockowner.service.d` and create it again as described in
+[Through /proc](#through-proc), before reloading.
 
 When updating from the manually configured lookup sandbox, install the generator and
 both units. Remove the old capability drop-in and the loader's old enablement link, so
@@ -308,7 +337,7 @@ sudo rm -f /etc/systemd/system/mihomo.service.d/proc-lookup.conf
 sudo systemctl disable mihomo-sockowner.service
 make -f /usr/share/selinux/devel/Makefile mihomo.pp
 sudo semodule -i mihomo.pp
-sudo install -m 644 mihomo.service mihomo-sockowner.service /etc/systemd/system/
+sudo install -m 644 mihomo.service socketowner.service /etc/systemd/system/
 sudo install -D -m 755 mihomo-process-generator \
     /etc/systemd/system-generators/mihomo-process-generator
 sudo restorecon -v /etc/systemd/system-generators/mihomo-process-generator
@@ -316,32 +345,32 @@ sudo systemctl daemon-reload
 sudo systemctl restart mihomo.service
 ```
 
-mihomo-sockowner no longer needs to be enabled: the generator starts it with mihomo
+socketowner no longer needs to be enabled: the generator starts it with mihomo
 whenever process lookup is on. In BPF-only mode, remove any `no-exec-paths.conf` loader
 drop-in so it records executables too.
 
 Rebuild and load the SELinux module, relabel `/etc/mihomo` (version 1.3 gave mihomo's
-writable files a type of their own) and, if you use it, `/usr/local/bin/mihomo-sockowner`
+writable files a type of their own) and, if you use it, `/usr/local/bin/socketowner`
 (version 1.5 added its type). Then install the files again as above and reload:
 
 ```sh
 make -f /usr/share/selinux/devel/Makefile mihomo.pp
 sudo semodule -i mihomo.pp
 sudo restorecon -Rv /etc/mihomo
-sudo restorecon -v /usr/local/bin/mihomo-sockowner
+sudo restorecon -v /usr/local/bin/socketowner
 sudo systemctl daemon-reload
 sudo systemctl reload killswitch.service
 sudo systemctl restart mihomo.service mihomo-v6-direct.service
 ```
 
-Version 1.6 records what each process runs in mihomo-sockowner, so process lookup no
+Version 1.6 records what each process runs in socketowner, so process lookup no
 longer needs `/proc`. When updating from an earlier version, rebuild and install
-mihomo-sockowner too and add `find-process-bpf-only: true` to `config.yaml` after
+socketowner too and add `find-process-bpf-only: true` to `config.yaml` after
 `find-process-bpf-map`:
 
 ```sh
 sudo systemctl daemon-reload
-sudo systemctl restart mihomo-sockowner.service
+sudo systemctl restart socketowner.service
 sudo systemctl restart mihomo.service
 ```
 

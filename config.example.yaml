@@ -15,7 +15,7 @@ ipv6: true
 # mihomo-process-generator reads these settings to select the service's sandbox. After
 # changing lookup mode, run daemon-reload and restart mihomo; see README.md.
 find-process-mode: always
-# Where mihomo.service shows it the maps of mihomo-sockowner.service, which record the
+# Where mihomo.service shows it the maps of socketowner.service, which record the
 # process behind each connection. mihomo.service gives mihomo no access to other processes,
 # so it only uses these maps and requires the loader. To search /proc instead, set
 # find-process-bpf-only to false; the generator grants the required access.

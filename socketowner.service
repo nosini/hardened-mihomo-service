@@ -7,8 +7,8 @@ Before=mihomo.service
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/local/bin/mihomo-sockowner -reader-group mihomo -exec-paths attach
-ExecStop=/usr/local/bin/mihomo-sockowner detach
+ExecStart=/usr/local/bin/socketowner -reader-group mihomo -exec-paths attach
+ExecStop=/usr/local/bin/socketowner detach
 
 # Loading and attaching cgroup BPF programs takes CAP_BPF and CAP_NET_ADMIN; CAP_CHOWN
 # gives the maps to the mihomo group. -exec-paths also records each process's executable,

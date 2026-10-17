@@ -140,14 +140,14 @@ def lookup_mode(filename):
 def dropin(mode):
     if mode == "bpf":
         return (
-            "[Unit]\nRequires=mihomo-sockowner.service\nAfter=mihomo-sockowner.service\n"
+            "[Unit]\nRequires=socketowner.service\nAfter=socketowner.service\n"
             "\n[Service]\n" + START +
             "BindReadOnlyPaths=/sys/fs/bpf/mihomo/maps:/run/mihomo-bpf\n"
         )
     if mode == "proc":
         return (
             # Start the loader when it's installed, but run without it if it fails.
-            "[Unit]\nWants=mihomo-sockowner.service\n"
+            "[Unit]\nWants=socketowner.service\n"
             "\n[Service]\n" + START +
             "ProtectProc=default\n"
             "CapabilityBoundingSet=\n"
