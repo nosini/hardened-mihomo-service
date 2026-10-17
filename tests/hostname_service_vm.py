@@ -23,6 +23,8 @@ import threading
 import time
 import urllib.request
 
+from hostname_http2 import run_http2_matrix
+
 NS = 'mihomo-hostname-review'
 # Holds the TUN group's server, so its address is not local to NS.
 REMOTE = 'mihomo-hostname-remote'
@@ -771,6 +773,10 @@ rules:
         systemctl('start', 'mihomo-hostname-observer.service')
         hrr_probe(pin_failure=True)
         print(f'PASS IPv{FAMILY} TLSv1.3 {"auto-redirect" if AUTO_REDIRECT else "TUN"} HelloRetryRequest and stable routes', flush=True)
+
+        run_http2_matrix(command=command, api=api, wait=wait, systemctl=systemctl,
+            listener=tun_server, run=RUN, pin=pin, family=FAMILY, inbound=inbound,
+            redirect_port=auto_redirect_port if AUTO_REDIRECT else None)
 
         if AUTO_REDIRECT:
             # Two original destinations collapse onto the same redirect

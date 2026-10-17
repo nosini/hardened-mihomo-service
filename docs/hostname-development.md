@@ -21,7 +21,8 @@ must verify the actual running contexts, not only successful starts.
 `tests/hostname_service_vm.py` requires root, systemd, enforcing SELinux, the
 SELinux development package, Python/PyYAML, gcc/OpenSSL headers, iproute2,
 nftables and the openssl CLI. Use a disposable Linux amd64 VM with the observer's
-exact verified libraries, BPF LSM, cgroup v2 and bpffs. Do not run it on a deployed machine.
+exact verified libraries, BPF LSM, cgroup v2, bpffs and packaged Python
+`h2` (hyper-h2). Do not run it on a deployed machine.
 It refuses existing Mihomo units, binaries, config, runtime/pin directories and
 policy module rather than replacing them.
 
@@ -72,10 +73,10 @@ The full-TLS matrix also fixes TLS 1.2/1.3, verifies the peer certificate and
 hostname with a client-only test trust store, checks a SHA-256 certificate pin,
 and exchanges known application bytes in both directions. Untrusted certificates,
 wrong hostnames and wrong pins must fail without delivering application data.
-In the default TUN mode, each family runs forty-six TLS connections:
-thirty-seven successful exchanges
+In the default TUN mode, each family runs fifty-four TLS connections:
+forty-three successful exchanges
 (including large ClientHellos, actual short-write retries, observer stop/restart,
-recovery after SIGKILL, feature disablement, TUN and session resumption) and nine
+recovery after SIGKILL, feature disablement, TUN and session resumption) and eleven
 intentional rejections. Both TLS versions exercise a ClientHello above 4 KiB and
 a pending write that starts with
 `SSL_ERROR_WANT_WRITE`, then completes through the real redirect listener. After
@@ -101,6 +102,25 @@ not ticket resumption, and use no added adapter/profile/runtime permissions.
 Cookie-only HRR, malformed retry flights and other TLS implementations remain
 unproved.
 
+The HTTP/2 group negotiates `h2` ALPN over both TLS 1.2 and 1.3 using the
+existing OpenSSL fixture. The test harness uses hyper-h2 to encode and validate
+both peers' HTTP/2 and HPACK state, without adding a protocol parser or dependency
+to Mihomo/observer/reader. New fixture commands expose only bounded application
+byte I/O after certificate, hostname, pin and ALPN verification.
+
+Each TLS version adds four connections: a named primary, ordinary fallback while
+the observer is stopped, a new hostname selecting RENAMED after restart, and a
+wrong-pin rejection that sends no HTTP/2 preface or request. Two streams are open
+at once on both peers before any response is sent. Request DATA alternates
+between stream IDs; response headers and DATA arrive in reverse/interleaved
+order. Bodies and status are checked per stream. The primary survives observer
+stop with responses held pending; both the named and fallback connections open
+another pair of streams after observer restart on the same connection ID,
+chain and destination. Ten successful streams per TLS version cover multiplexing
+and reuse. The group adds eight TLS connections and twenty streams per mode/family.
+This is controlled same-origin HTTP/2, not browser cross-origin coalescing,
+HTTP/2 proxying inside Mihomo, load testing or a general HTTP/2 conformance suite.
+
 The TUN resumption group adds eleven connections per TLS version. A persistent
 server context accepts saved tickets on new SSL objects and on the same object
 after `SSL_clear` and socket replacement. Both peers must confirm whether the
@@ -122,8 +142,8 @@ can drop relay packets despite an advertised window because skb overhead also
 counts against receive memory; it is not a suitable baseline for session tests.
 Unexpected session exchange failures save both namespaces’ socket states.
 
-With `--auto-redirect`, each family runs fifty-four TLS connections:
-thirty-nine successful exchanges and fifteen deliberate rejections. Eight
+With `--auto-redirect`, each family runs sixty-two TLS connections:
+forty-five successful exchanges and seventeen deliberate rejections. Eight
 additional connections check both TLS versions' certificate, hostname and pin
 behavior through the actual redirect listener; the loopback groups stay intact.
 The remote-server and resumption groups enable
