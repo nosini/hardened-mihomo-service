@@ -28,6 +28,7 @@ REMOTE = 'mihomo-hostname-remote'
 RUN = None
 PACK = None
 FAMILY = 4
+AUTO_REDIRECT = False
 
 
 def call(*args, check=True, **kw):
@@ -59,11 +60,60 @@ def api(path):
         return json.load(response)
 
 
+def application_user():
+    os.setgroups([])
+    os.setgid(1000)
+    os.setuid(1000)
+
+
 def wait_mihomo():
     wait(lambda: api('/version'))
     # The control API starts before inbound listeners. Avoid sending a SYN to
     # a not-yet-listening REDIRECT port immediately after a service restart.
     wait(lambda: call('ss', '-H', '-ltn', 'sport = :18661').stdout.strip())
+    # ApplyConfig creates listeners before tunnel.OnRunning. A listening port
+    # alone can still accept and discard a connection during that interval.
+    # Probe an independent unobserved flow, with its own destination/rule, so
+    # readiness retries cannot consume or retry a matrix connection.
+    address = '127.0.0.1' if FAMILY == 4 else '::1'
+    with socket.socket(socket.AF_INET if FAMILY == 4 else socket.AF_INET6) as peer:
+        peer.bind((address, 0))
+        peer.listen()
+        peer.settimeout(1)
+        port = peer.getsockname()[1]
+        call('nft', '-f', '-', input=f'''table inet hostname_ready {{
+ chain output {{ type nat hook output priority dstnat; policy accept;
+ meta skuid 1000 {'ip' if FAMILY == 4 else 'ip6'} daddr {address} tcp dport {port} redirect to :18661
+ }}
+}}''')
+        try:
+            def relay_ready():
+                script = ('import socket; '
+                          f's=socket.socket(socket.AF_INET{6 if FAMILY == 6 else ""}); '
+                          's.settimeout(1); '
+                          f's.connect(({address!r},{port})); '
+                          's.sendall(b"ready"); assert s.recv(5)==b"ready"')
+                child = subprocess.Popen([sys.executable, '-c', script],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    preexec_fn=application_user)
+                try:
+                    accepted, _ = peer.accept()
+                    with accepted:
+                        accepted.settimeout(1)
+                        if accepted.recv(5) != b'ready':
+                            return False
+                        accepted.sendall(b'ready')
+                    return child.wait(timeout=2) == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    return False
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                    child.wait()
+            wait(relay_ready)
+            wait(lambda: not api('/connections')['connections'])
+        finally:
+            call('nft', 'delete', 'table', 'inet', 'hostname_ready')
 
 
 def inside():
@@ -71,6 +121,7 @@ def inside():
     call('ip', 'link', 'set', 'lo', 'up')
     # This fixture-owned netns uses small receive windows to force actual
     # nonblocking retries through the real redirect listener.
+    receive_defaults = Path('/proc/sys/net/ipv4/tcp_rmem').read_text()
     Path('/proc/sys/net/ipv4/tcp_rmem').write_text('4096 4096 4096\n')
     # An isolated non-loopback path proves the shipped kill-switch output drop
     # survives observer failure. It has no route to the guest or the LAN.
@@ -159,10 +210,6 @@ rules:
         installed.append(generator)
         call('restorecon', str(generator))
         cgroup.mkdir()
-        def unprivileged():
-            os.setgroups([])
-            os.setgid(1000)
-            os.setuid(1000)
         # Ephemeral fixture trust stays in this run directory and client only.
         for name in ('peer', 'untrusted'):
             call('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
@@ -173,7 +220,7 @@ rules:
         pin = hashlib.sha256(certificate).hexdigest()
         client = subprocess.Popen(['/usr/local/bin/hostname-review-client', str(FAMILY), address, str(port)],
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  text=True, preexec_fn=unprivileged)
+                                  text=True, preexec_fn=application_user)
         assert client.stdout.readline().strip() == 'ready'
         (cgroup / 'cgroup.procs').write_text(str(client.pid))
         observer = '/usr/local/bin/mihomo-hostname-observer'
@@ -232,8 +279,13 @@ rules:
             opened = command('open route.invalid name-first fd')
             assert opened.startswith('socket '), opened
             slot = int(opened.split()[1])
-            command(f'handshake {slot}')
-            accepted, _ = (listener or server).accept()
+            hello = command(f'handshake {slot}')
+            assert hello == f'handshake {slot} -1 2', hello
+            try:
+                accepted, _ = (listener or server).accept()
+            except TimeoutError:
+                (RUN / 'probe-sockets.log').write_text(call('ss', '-tinm').stdout)
+                raise
             try:
                 accepted.settimeout(5)
                 data = accepted.recv(4096)
@@ -241,6 +293,8 @@ rules:
                 connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
                 assert ('NAMED' in connection['chains']) == named, connection
                 assert connection['metadata']['type'] == inbound, connection
+                if AUTO_REDIRECT and listener is not None:
+                    assert int(connection['metadata']['inboundPort']) == auto_redirect_port, connection
                 # The real destination is kept, never replaced by the name.
                 peer = accepted.getsockname()
                 assert connection['metadata']['destinationIP'] == peer[0], connection
@@ -275,6 +329,8 @@ rules:
             connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
             assert ('NAMED' in connection['chains']) == named, connection
             assert connection['metadata']['type'] == inbound, connection
+            if AUTO_REDIRECT and listener is not None:
+                assert int(connection['metadata']['inboundPort']) == auto_redirect_port, connection
             expected = (listener or server).getsockname()
             assert connection['metadata']['destinationIP'] == expected[0], connection
             assert connection['metadata']['destinationPort'] == str(expected[1]), connection
@@ -345,6 +401,15 @@ rules:
             for window in ('large', 'retry'):
                 tls_probe(True, version, window=window)
         print(f'PASS IPv{FAMILY} large ClientHello and short-write TLS 1.2/1.3', flush=True)
+        # A 4 KiB total receive allocation can drop whole relay packets even
+        # with an advertised window (skb overhead counts toward this limit).
+        # Keep that pressure in the short-write cases, then recreate listeners
+        # with normal buffers for the certificate/session matrices.
+        Path('/proc/sys/net/ipv4/tcp_rmem').write_text(receive_defaults)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, int(receive_defaults.split()[1]))
+        systemctl('restart', 'mihomo.service')
+        wait_mihomo()
+        systemctl('start', 'mihomo-hostname-observer.service')
         for version in (12, 13):
             tls_probe(True, version)
             for failure in ('trust', 'hostname', 'pin'):
@@ -442,6 +507,8 @@ rules:
   auto-detect-interface: true
   inet4-address: [198.18.0.1/30]
   inet6-address: [fdfe:dcba:9876::1/126]'''))
+        if AUTO_REDIRECT:
+            config.write_text(config.read_text().replace('  auto-route: true', '  auto-route: true\n  auto-redirect: true'))
         systemctl('restart', 'mihomo.service')
         wait_mihomo()
         # /sys/class/net still shows the guest's devices; ask this namespace.
@@ -462,16 +529,26 @@ rules:
             return routes and routes[0]['dev'] == 'Mihomo'
 
         wait(tun_ready)
+        inbound = 'Redir' if AUTO_REDIRECT else 'Tun'
+        if AUTO_REDIRECT:
+            auto_redirect_port = int(wait(lambda: re.search(r'redirect to :(\d+)',
+                call('nft', 'list', 'table', 'inet', 'mihomo', check=False).stdout)).group(1))
         assert command('any-source') == 'ok'
         assert command(f'destination {remote} {tun_server.getsockname()[1]}') == 'ok'
-        probe(True, tun_server, 'Tun')
-        tls_probe(True, 13, listener=tun_server, inbound='Tun')
+        probe(True, tun_server, inbound)
+        tls_probe(True, 13, listener=tun_server, inbound=inbound)
+        if AUTO_REDIRECT:
+            for version in (12, 13):
+                tls_probe(True, version, listener=tun_server, inbound=inbound)
+                for failure in ('trust', 'hostname', 'pin'):
+                    tls_probe(True, version, failure, listener=tun_server, inbound=inbound)
+            print(f'PASS IPv{FAMILY} auto-redirect TLS 1.2/1.3 certificate, hostname and pin verification', flush=True)
         systemctl('stop', 'mihomo-hostname-observer.service')
-        probe(False, tun_server, 'Tun')
+        probe(False, tun_server, inbound)
         systemctl('start', 'mihomo-hostname-observer.service')
-        probe(True, tun_server, 'Tun')
+        probe(True, tun_server, inbound)
         assert 'CapEff:\t0000000000001400' in Path(f'/proc/{int(systemctl("show", "-p", "MainPID", "--value", "mihomo.service").stdout)}/status').read_text()
-        print(f'PASS IPv{FAMILY} TUN system-stack named routing, completed TLS and fallback', flush=True)
+        print(f'PASS IPv{FAMILY} {"auto-redirect" if AUTO_REDIRECT else "TUN system-stack"} named routing, completed TLS and fallback', flush=True)
         def session_context(version):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(str(RUN / 'peer.pem'), str(RUN / 'peer.key'))
@@ -502,7 +579,9 @@ rules:
             accepted, _ = tun_server.accept()
             accepted.settimeout(5)
             connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
-            assert connection['metadata']['type'] == 'Tun', connection
+            assert connection['metadata']['type'] == inbound, connection
+            if AUTO_REDIRECT:
+                assert int(connection['metadata']['inboundPort']) == auto_redirect_port, connection
             assert connection['metadata']['destinationIP'] == remote, connection
             assert connection['metadata']['destinationPort'] == str(tun_server.getsockname()[1]), connection
             selected = next((item for item in connection['chains'] if item in ('NAMED', 'RENAMED')), 'DIRECT')
@@ -539,13 +618,23 @@ rules:
                 for _ in range(1 if pin_failure else rounds):
                     reply = command(f'exchange {slot}')
                     expected = 'pin-failed' if pin_failure else f'ok TLSv1.{version - 10}'
-                    assert reply == f'exchange {slot} {expected}', reply
+                    if reply != f'exchange {slot} {expected}':
+                        (RUN / 'session-sockets.log').write_text(
+                            call('ss', '-tinm').stdout + '\nREMOTE\n' +
+                            call('ip', 'netns', 'exec', REMOTE, 'ss', '-tinm').stdout)
+                        (RUN / 'session-routes.log').write_text(
+                            call('ip', '-6', 'rule', 'show').stdout + '\nROUTES\n' +
+                            call('ip', '-6', 'route', 'show', 'table', 'all').stdout +
+                            '\nLOOKUP\n' + call('ip', f'-{FAMILY}', 'route', 'get', remote,
+                                                  'uid', '1000').stdout)
+                    assert reply == f'exchange {slot} {expected}', (reply, result)
                     live = api('/connections')['connections']
                     assert len(live) == 1 and live[0]['id'] == connection['id'], live
                     assert live[0]['chains'] == connection['chains'], live
                 state = command(f'session-state {slot}')
                 assert state.startswith(f'session {slot} reused {int(resumed)} resumable '), state
-                assert command(f'shutdown {slot}') == f'shutdown {slot} ok'
+                shutdown_reply = command(f'shutdown {slot}')
+                assert shutdown_reply == f'shutdown {slot} ok', (shutdown_reply, result)
                 worker.join(timeout=6)
                 assert not worker.is_alive(), result
                 assert result['error'] is None, result
@@ -562,7 +651,7 @@ rules:
                       f'pin_rejected={pin_failure}', flush=True)
                 return fields
             finally:
-                if not complete:
+                if not complete and client.poll() is None:
                     command(f'close {slot}')
                 accepted.close()
                 worker.join(timeout=6)
@@ -595,7 +684,68 @@ rules:
             # any application request, even when no certificate is resent.
             current = session_probe(context, version, previous=current, resume=True, resumed=True, pin_failure=True)
             assert command(f'close {current[1]}') == 'ok'
-            print(f'PASS IPv{FAMILY} TLSv1.{version - 10} TUN session resumption, SSL reuse and fallback', flush=True)
+            print(f'PASS IPv{FAMILY} TLSv1.{version - 10} {"auto-redirect" if AUTO_REDIRECT else "TUN"} session resumption, SSL reuse and fallback', flush=True)
+
+        if AUTO_REDIRECT:
+            # Two original destinations collapse onto the same redirect
+            # listener. Hold both connections live and force the same source
+            # port, so NAT must distinguish their accepted source ports.
+            alternate = '203.0.113.3' if FAMILY == 4 else '2001:db8:7::3'
+            call('ip', '-n', REMOTE, 'address', 'add', alternate + host, 'dev', 'lo')
+            own = os.open('/proc/self/ns/net', os.O_RDONLY)
+            theirs = os.open(f'/run/netns/{REMOTE}', os.O_RDONLY)
+            try:
+                os.setns(theirs, os.CLONE_NEWNET)
+                second = socket.socket(socket.AF_INET if FAMILY == 4 else socket.AF_INET6)
+                second.bind((alternate, tun_server.getsockname()[1]))
+                second.listen()
+                second.settimeout(5)
+            finally:
+                os.setns(own, os.CLONE_NEWNET)
+                os.close(own)
+                os.close(theirs)
+            slots, peers, reports, routed = [], [], [], []
+            try:
+                cases = ((remote, 'route.invalid', 'NAMED', tun_server),
+                         (alternate, 'reuse.invalid', 'RENAMED', second))
+                for target, name, chain, listener in cases:
+                    assert command(f'destination {target} {listener.getsockname()[1]}') == 'ok'
+                    opened = command(f'open {name} name-first fd').split()
+                    assert opened[0] == 'socket', opened
+                    slot = int(opened[1])
+                    slots.append(slot)
+                    reports.append(opened)
+                    if len(slots) == 1:
+                        assert command(f'source {opened[4]}') == 'ok'
+                    else:
+                        assert opened[4] == reports[0][4] and opened[2] != reports[0][2], reports
+                    assert command(f'handshake {slot}') == f'handshake {slot} -1 2'
+                    peer, _ = listener.accept()
+                    peers.append(peer)
+                    peer.settimeout(5)
+                    hello = peer.recv(4096)
+                    assert hello.startswith(b'\x16\x03') and name.encode() in hello, hello
+                    entry = wait(lambda: next((item for item in api('/connections')['connections'] or []
+                                               if item['metadata']['destinationIP'] == target), None))
+                    assert entry['metadata']['type'] == 'Redir', entry
+                    assert int(entry['metadata']['inboundPort']) == auto_redirect_port, entry
+                    assert entry['metadata']['destinationPort'] == str(listener.getsockname()[1]), entry
+                    assert chain in entry['chains'] and ({'NAMED', 'RENAMED'} - {chain}).isdisjoint(entry['chains']), entry
+                    routed.append(entry)
+                ports = [int(item['metadata']['sourcePort']) for item in routed]
+                assert ports[0] != ports[1] and any(value != int(reports[0][4]) for value in ports), (ports, reports)
+                assert routed[0]['metadata']['sourceIP'] == routed[1]['metadata']['sourceIP'], routed
+                assert len(api('/connections')['connections']) == 2
+            finally:
+                for slot in slots:
+                    command(f'close {slot}')
+                for peer in peers:
+                    peer.close()
+                second.close()
+                command('source 0')
+                command(f'destination {remote} {tun_server.getsockname()[1]}')
+            wait(lambda: not api('/connections')['connections'])
+            print(f'PASS IPv{FAMILY} auto-redirect source-port collision preserves distinct names and destinations', flush=True)
 
         # Exit does not cause the service to attach to another numeric PID.
         client.stdin.close()
@@ -644,13 +794,15 @@ rules:
 
 
 def main():
-    global RUN, PACK, FAMILY
+    global RUN, PACK, FAMILY, AUTO_REDIRECT
     parser = argparse.ArgumentParser()
     parser.add_argument('run', type=Path)
     parser.add_argument('--inside', action='store_true')
     parser.add_argument('--family', type=int, choices=(4, 6), default=4)
+    parser.add_argument('--auto-redirect', action='store_true')
     args = parser.parse_args()
     FAMILY = args.family
+    AUTO_REDIRECT = args.auto_redirect
     RUN = args.run.resolve()
     PACK = RUN / 'packaging'
     assert os.geteuid() == 0
@@ -673,7 +825,7 @@ def main():
     guest_tcp_rmem = Path('/proc/sys/net/ipv4/tcp_rmem').read_text()
     call('ip', 'netns', 'add', NS)
     try:
-        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), check=False)
+        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), *(['--auto-redirect'] if AUTO_REDIRECT else []), check=False)
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
         assert result.returncode == 0, f'VM test failed ({result.returncode})'

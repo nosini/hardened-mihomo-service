@@ -39,6 +39,9 @@ Run, keeping logs in that directory:
 ```sh
 sudo python3 tests/hostname_service_vm.py /absolute/path/to/run --family 4
 sudo python3 tests/hostname_service_vm.py /absolute/path/to/run --family 6
+# Repeat the service matrices with the actual local nftables auto-redirect listener:
+sudo python3 tests/hostname_service_vm.py /absolute/path/to/run --family 4 --auto-redirect
+sudo python3 tests/hostname_service_vm.py /absolute/path/to/run --family 6 --auto-redirect
 ```
 
 The harness compiles/loads the shipped policy, temporarily installs the binaries,
@@ -69,7 +72,8 @@ The full-TLS matrix also fixes TLS 1.2/1.3, verifies the peer certificate and
 hostname with a client-only test trust store, checks a SHA-256 certificate pin,
 and exchanges known application bytes in both directions. Untrusted certificates,
 wrong hostnames and wrong pins must fail without delivering application data.
-Each family runs forty-one TLS connections: thirty-three successful exchanges
+In the default TUN mode, each family runs forty-one TLS connections:
+thirty-three successful exchanges
 (including large ClientHellos, actual short-write retries, observer stop/restart,
 recovery after SIGKILL, feature disablement, TUN and session resumption) and eight
 intentional rejections. Both TLS versions exercise a ClientHello above 4 KiB and
@@ -92,10 +96,35 @@ repeated application exchanges. The seed verifies the certificate and hostname;
 every resumed connection still checks the peer certificate pin. Sessions remain
 in client memory, and clean TLS shutdown preserves their eligibility for reuse.
 No adapter, profile, service unit, capability or SELinux policy change is needed.
+The fixture retries shutdown progress immediately, and polls only actual
+WANT_READ/WANT_WRITE failures, so buffered close-notify data cannot stall reuse.
+The socketowner fixture also has a deterministic regression for that API contract.
+The 4 KiB receive-memory limit is scoped to the large/short-write group, then
+normal defaults and fresh listeners are restored. Leaving that limit active
+can drop relay packets despite an advertised window because skb overhead also
+counts against receive memory; it is not a suitable baseline for session tests.
+Unexpected session exchange failures save both namespaces’ socket states.
 
-Run both family selections sequentially; they use the same temporary service
+With `--auto-redirect`, each family runs forty-nine TLS connections:
+thirty-five successful exchanges and fourteen deliberate rejections. Eight
+additional connections check both TLS versions' certificate, hostname and pin
+behavior through the actual redirect listener; the loopback groups stay intact.
+The remote-server and resumption groups enable
+`auto-redirect: true` and assert REDIR metadata plus the port from the installed
+nft redirect rule. A final collision group holds two ClientHellos with distinct
+names/destination IPs and the same requested source port. It requires distinct
+accepted source ports, correct routes and unchanged destinations/ClientHellos.
+No service capability, policy or runtime change is needed. This validates local
+nftables OUTPUT; forwarded/prerouting, bridge and iptables-fallback traffic remain
+unproved. Earlier descriptions of auto-redirect as unknown were incorrect: the
+listener already supplies REDIR metadata to the existing accepted-socket lookup.
+
+Run both family selections and interception modes sequentially; they use the same temporary service
 paths. The control API starts before inbound listeners, so the harness waits for
-the REDIRECT listener too. The TUN group waits for its address to finish IPv6
+the REDIRECT listener too, then confirms a bidirectional relay using a separate
+unobserved readiness flow. Listener creation precedes `tunnel.OnRunning`, so
+a listening socket alone is insufficient. Readiness retries never retry a
+matrix connection. The TUN group waits for its address to finish IPv6
 duplicate-address detection, its system-stack listener and the application's
 route into the device before opening the first connection. Empty connection
 snapshots are retried. A wrong-pin client may close while the server writes a
@@ -113,3 +142,18 @@ namespace identity rejection, malformed registrations, and the existing
 publication, lifetime, bootstrap and routing matrices. Run it after changes to
 observer initialization or link ownership, using a temporary three-module Go
 workspace containing socketowner, socketowner/hostname and Mihomo.
+
+IPv6 system-stack and auto-redirect regressions exposed an intermittent auto-route
+transport failure after successful attribution/handshake: subsequent application
+packets selected the uplink instead of `Mihomo`. nft trace confirmed a drop by
+the shipped kill switch's output policy. This remains unresolved; an earlier
+successful matrix does not establish reliable IPv6 transport. No
+firewall exception or matrix retry was added. IPv4 auto-redirect passed.
+Repeated final IPv6 runs failed, despite earlier complete passes. On session exchange failure, the harness saves socket and route
+state for diagnosis.
+
+One IPv6 loopback REDIRECT recovery run also selected ordinary fallback for the
+first expected named connection after automatic observer restart. Earlier and
+later recovery checks passed, but that failure is not explained by the TUN
+route trace. Observer recovery reliability remains a separate open issue;
+the fallback preserved the original destination and ClientHello.

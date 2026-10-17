@@ -18,8 +18,10 @@ from REDIRECT and from the shipped TUN configuration (`stack: system`; `mixed`
 behaves the same for TCP).
 With fake-ip DNS, applications using the system resolver already reach Mihomo
 with a fake IP and keep that behavior; discovery adds names for applications
-that resolve names themselves. The `gvisor` stack and `auto-redirect` stay
-unknown. This package does not change interception, DNS, TUN or firewall rules.
+that resolve names themselves. Local nftables `auto-redirect` also passes through its existing REDIR lookup,
+including simultaneous source-port collisions and completed TLS/resumption.
+Native `gvisor` TCP stays unknown; forwarded/bridged and iptables-fallback paths
+remain unproved. This package does not change interception, DNS, TUN or firewall rules.
 See the [observer requirements](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/experiments/hostname/OBSERVER.md)
 and [reader contract](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/hostname/PROFILE3.md).
 
