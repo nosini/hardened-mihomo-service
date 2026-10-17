@@ -125,8 +125,10 @@ tun: {enable: false}
 dns: {enable: false}
 proxy-groups:
   - {name: NAMED, type: select, proxies: [DIRECT]}
+  - {name: RENAMED, type: select, proxies: [DIRECT]}
 rules:
   - DOMAIN,route.invalid,NAMED
+  - DOMAIN,reuse.invalid,RENAMED
   - MATCH,DIRECT
 ''')
         os.chown(config, 0, account.pw_gid)
@@ -166,7 +168,7 @@ rules:
             call('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
                  '-keyout', str(RUN / (name + '.key')), '-out', str(RUN / (name + '.pem')),
                  '-days', '1', '-subj', '/CN=route.invalid',
-                 '-addext', 'subjectAltName=DNS:route.invalid')
+                 '-addext', 'subjectAltName=DNS:route.invalid,DNS:reuse.invalid')
         certificate = ssl.PEM_cert_to_DER_cert((RUN / 'peer.pem').read_text())
         pin = hashlib.sha256(certificate).hexdigest()
         client = subprocess.Popen(['/usr/local/bin/hostname-review-client', str(FAMILY), address, str(port)],
@@ -470,6 +472,131 @@ rules:
         probe(True, tun_server, 'Tun')
         assert 'CapEff:\t0000000000001400' in Path(f'/proc/{int(systemctl("show", "-p", "MainPID", "--value", "mihomo.service").stdout)}/status').read_text()
         print(f'PASS IPv{FAMILY} TUN system-stack named routing, completed TLS and fallback', flush=True)
+        def session_context(version):
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(str(RUN / 'peer.pem'), str(RUN / 'peer.key'))
+            protocol = ssl.TLSVersion.TLSv1_2 if version == 12 else ssl.TLSVersion.TLSv1_3
+            context.minimum_version = context.maximum_version = protocol
+            return context
+
+        def session_probe(context, version, *, previous=None, resume=False,
+                          resumed=False, name='route.invalid', chain='NAMED',
+                          rounds=1, pin_failure=False):
+            # The server context persists between connections, including its
+            # ticket keys. Each invocation still gets a new TCP lifetime.
+            if previous is None:
+                opened = command(f'open {name} name-first fd')
+            else:
+                opened = command(f'reopen {previous[1]} {name}')
+            fields = opened.split()
+            assert fields[0] == 'socket', opened
+            slot = int(fields[1])
+            if previous is not None:
+                assert fields[1] == previous[1] and fields[2] != previous[2], (previous, fields)
+            expected_pin = '0' * 64 if pin_failure else pin
+            hostname = 'route.invalid' if name == '-' else name
+            assert command(f'verify {slot} {RUN / "peer.pem"} {hostname} {expected_pin} {version}') == 'ok'
+            if resume:
+                assert command(f'resume {slot}') == 'ok'
+            assert command(f'handshake {slot}') == f'handshake {slot} -1 2'
+            accepted, _ = tun_server.accept()
+            accepted.settimeout(5)
+            connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
+            assert connection['metadata']['type'] == 'Tun', connection
+            assert connection['metadata']['destinationIP'] == remote, connection
+            assert connection['metadata']['destinationPort'] == str(tun_server.getsockname()[1]), connection
+            selected = next((item for item in connection['chains'] if item in ('NAMED', 'RENAMED')), 'DIRECT')
+            assert selected == chain, connection
+            result = {'names': [], 'requests': [], 'error': None}
+            context.set_servername_callback(lambda _sock, value, _ctx: result['names'].append(value))
+
+            def serve_session():
+                try:
+                    with context.wrap_socket(accepted, server_side=True) as peer:
+                        result['resumed'] = peer.session_reused
+                        result['version'] = peer.version()
+                        request = b'hostname-fixture-request\n'
+                        for _ in range(0 if pin_failure else rounds):
+                            received = b''
+                            while len(received) < len(request):
+                                chunk = peer.recv(len(request) - len(received))
+                                assert chunk, result
+                                received += chunk
+                            assert received == request, received
+                            result['requests'].append(received)
+                            peer.sendall(b'hostname-fixture-response\n')
+                        # Reuse tests close TLS cleanly so the retained session
+                        # is not invalidated by SSL_free or SSL_clear.
+                        assert peer.recv(1) == b'', result
+                        peer.unwrap().close()
+                except Exception as error:
+                    result['error'] = error
+
+            worker = threading.Thread(target=serve_session, daemon=True)
+            worker.start()
+            complete = False
+            try:
+                for _ in range(1 if pin_failure else rounds):
+                    reply = command(f'exchange {slot}')
+                    expected = 'pin-failed' if pin_failure else f'ok TLSv1.{version - 10}'
+                    assert reply == f'exchange {slot} {expected}', reply
+                    live = api('/connections')['connections']
+                    assert len(live) == 1 and live[0]['id'] == connection['id'], live
+                    assert live[0]['chains'] == connection['chains'], live
+                state = command(f'session-state {slot}')
+                assert state.startswith(f'session {slot} reused {int(resumed)} resumable '), state
+                assert command(f'shutdown {slot}') == f'shutdown {slot} ok'
+                worker.join(timeout=6)
+                assert not worker.is_alive(), result
+                assert result['error'] is None, result
+                assert result['resumed'] == resumed, result
+                assert result['version'] == f'TLSv1.{version - 10}', result
+                assert result['names'] == [None if name == '-' else name], result
+                assert len(result['requests']) == (0 if pin_failure else rounds), result
+                if not pin_failure:
+                    assert command(f'save-session {slot}') == 'ok'
+                wait(lambda: not api('/connections')['connections'])
+                complete = True
+                print(f'  TLSv1.{version - 10} name={name} chain={chain} offered={resume} '
+                      f'resumed={resumed} same_ssl={previous is not None} rounds={rounds} '
+                      f'pin_rejected={pin_failure}', flush=True)
+                return fields
+            finally:
+                if not complete:
+                    command(f'close {slot}')
+                accepted.close()
+                worker.join(timeout=6)
+
+        for version in (12, 13):
+            context = session_context(version)
+            # A seed and a different SSL object with its retained ticket.
+            saved = session_probe(context, version)
+            assert command(f'close {saved[1]}') == 'ok'
+            current = session_probe(context, version, resume=True, resumed=True)
+            assert current[2] != saved[2], (saved, current)
+            # Then the exact same SSL object, reset onto successive sockets.
+            current = session_probe(context, version, previous=current, resume=True, resumed=True, rounds=3)
+            current = session_probe(context, version, previous=current, resume=True, resumed=True)
+            # A new name must select a different rule; clearing the name must
+            # not leave either old name authoritative on the next connection.
+            current = session_probe(context, version, previous=current, name='reuse.invalid', chain='RENAMED')
+            current = session_probe(context, version, previous=current, name='-', chain='DIRECT')
+            current = session_probe(context, version, previous=current)
+            # A different server context declines the offered ticket and does
+            # a full handshake. This must not change hostname routing.
+            context = session_context(version)
+            current = session_probe(context, version, previous=current, resume=True)
+            systemctl('stop', 'mihomo-hostname-observer.service')
+            current = session_probe(context, version, previous=current, resume=True, resumed=True, chain='DIRECT')
+            systemctl('reset-failed', 'mihomo-hostname-observer.service')
+            systemctl('start', 'mihomo-hostname-observer.service')
+            current = session_probe(context, version, previous=current, resume=True, resumed=True)
+            # Pin checks still run on an actually resumed handshake, before
+            # any application request, even when no certificate is resent.
+            current = session_probe(context, version, previous=current, resume=True, resumed=True, pin_failure=True)
+            assert command(f'close {current[1]}') == 'ok'
+            print(f'PASS IPv{FAMILY} TLSv1.{version - 10} TUN session resumption, SSL reuse and fallback', flush=True)
+
         # Exit does not cause the service to attach to another numeric PID.
         client.stdin.close()
         client.wait(timeout=5)

@@ -69,15 +69,29 @@ The full-TLS matrix also fixes TLS 1.2/1.3, verifies the peer certificate and
 hostname with a client-only test trust store, checks a SHA-256 certificate pin,
 and exchanges known application bytes in both directions. Untrusted certificates,
 wrong hostnames and wrong pins must fail without delivering application data.
-Each family runs nineteen TLS cases: thirteen successful exchanges (including
-large ClientHellos, actual short-write retries, observer stop/restart, recovery
-after SIGKILL, feature disablement and TUN) and six intentional rejections. Both TLS
-versions exercise a ClientHello above 4 KiB and a pending write that starts with
+Each family runs forty-one TLS connections: thirty-three successful exchanges
+(including large ClientHellos, actual short-write retries, observer stop/restart,
+recovery after SIGKILL, feature disablement, TUN and session resumption) and eight
+intentional rejections. Both TLS versions exercise a ClientHello above 4 KiB and
+a pending write that starts with
 `SSL_ERROR_WANT_WRITE`, then completes through the real redirect listener. After
 the handshake and application exchange, the same connection ID and chain must
 remain live despite unsupported later sends revoking initial-window discovery
 authority. The peer checks the unchanged SNI, and the API confirms the
 original destination IP/port.
+
+The TUN resumption group adds eleven connections per TLS version. A persistent
+server context accepts saved tickets on new SSL objects and on the same object
+after `SSL_clear` and socket replacement. Both peers must confirm whether the
+handshake actually resumed. Cases include successive resets, three requests on
+one live connection, a new hostname selecting a different chain, a removed name
+falling back to DIRECT, a ticket declined by a fresh server context, observer
+stop/restart fallback and a wrong pin on a resumed session delivering no request.
+Each new socket has a fresh cookie; the same connection ID and route survive
+repeated application exchanges. The seed verifies the certificate and hostname;
+every resumed connection still checks the peer certificate pin. Sessions remain
+in client memory, and clean TLS shutdown preserves their eligibility for reuse.
+No adapter, profile, service unit, capability or SELinux policy change is needed.
 
 Run both family selections sequentially; they use the same temporary service
 paths. The control API starts before inbound listeners, so the harness waits for
@@ -90,8 +104,9 @@ in that rejection case, which must still deliver no application request. Certifi
 keys remain in the task run directory for its owner to remove after collecting
 logs; no test trust enters the system store. The harness collects service
 journals and client stderr before removing its own installations and policy.
-Browser encrypted DNS/ECH, session resumption, performance and broader
-applications remain unproved.
+Browser encrypted DNS/ECH, early data, HelloRetryRequest, cross-origin reuse,
+performance and broader applications remain unproved. Resumption coverage is
+limited to TLS tickets and the controlled OpenSSL socket-BIO fixture.
 
 Socketowner's separate tagged VM suite covers journal ownership, pidfd/boot/PID
 namespace identity rejection, malformed registrations, and the existing

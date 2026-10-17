@@ -10,9 +10,12 @@ one initial ClientHello record of at most 16 KiB with verified same-SSL/name
 retries inside its remaining bytes, and 256 concurrently retained socket guards
 per observer instance; final release reclaims slots. Controlled TLS 1.2/1.3
 certificate/hostname verification, certificate pinning and application exchange
-pass for IPv4/IPv6; browser ECH, QUIC and broad application discovery remain
-unsupported. Mihomo looks up real-IP TCP connections from REDIRECT and from the
-shipped TUN configuration (`stack: system`; `mixed` behaves the same for TCP).
+pass for IPv4/IPv6. Controlled TLS ticket resumption and `SSL_clear` reuse onto
+new sockets also pass through the confined TUN service, including changed or
+removed names and observer-stop fallback. Browser ECH, early data, QUIC and broad
+application discovery remain unsupported. Mihomo looks up real-IP TCP connections
+from REDIRECT and from the shipped TUN configuration (`stack: system`; `mixed`
+behaves the same for TCP).
 With fake-ip DNS, applications using the system resolver already reach Mihomo
 with a fake IP and keep that behavior; discovery adds names for applications
 that resolve names themselves. The `gvisor` stack and `auto-redirect` stay
