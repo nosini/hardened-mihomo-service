@@ -45,6 +45,11 @@ sudo python3 tests/hostname_service_vm.py /absolute/path/to/run --family 4 --aut
 sudo python3 tests/hostname_service_vm.py /absolute/path/to/run --family 6 --auto-redirect
 ```
 
+Add `--curl-compat` to any of those commands for the optional real-application
+boundary check. It requires the verified curl/libcurl 8.22.0 OpenSSL 3.5.3 build
+and uses explicit reserved hostname-to-fixture-IP mappings, private test CA trust,
+and HTTP/1.1. It does not contact public hosts or change the system trust store.
+
 The harness compiles/loads the shipped policy, temporarily installs the binaries,
 units and actual generator, and selects a dedicated network namespace for Mihomo
 and the shipped kill switch. Its target runs as UID 1000; the observer uses the
@@ -239,3 +244,39 @@ One earlier IPv6 loopback recovery failure had the same fallback symptom and
 preserved the destination and ClientHello, but its logs lack a syscall-level
 cause. The deterministic regression establishes a real cause of that symptom;
 it does not prove the earlier event's exact trigger retrospectively.
+
+## Real curl compatibility boundary
+
+The optional `--curl-compat` group runs the installed, unmodified curl binary as
+UID 1000 after the controlled fixture exits. Curl waits for stdin configuration
+EOF with its real libraries loaded. The harness records library hashes,
+registers that exact TGID/cgroup and starts the confined observer before allowing
+a transfer. Each case uses a fresh process and observer registration, with the
+observer confirmed active in `mihomo_hostname_t` before curl gets its URL.
+
+For each TLS version, `route.invalid` and `reuse.invalid` complete verified
+HTTPS requests through ordinary DIRECT fallback. Their metadata has no hostname,
+even though corresponding DOMAIN rules and the observer are enabled. The server
+checks actual SNI, fixed TLS version, HTTP/1.1 ALPN, path and Host including port;
+the client checks the complete response body. Wrong-host and wrong-public-key-pin
+cases exit with curl codes 60 and 90, respectively, and deliver no HTTP request.
+Curl uses its SPKI public-key pin here, independently of the controlled C
+fixture's whole-certificate pin.
+
+This is a verified unsupported application path, not successful hostname
+attribution. [curl 8.22.0's OpenSSL backend](https://github.com/curl/curl/blob/curl-8_22_0/lib/vtls/openssl.c)
+creates a custom BIO whose data points to curl's connection filter; the current
+observer verifies a raw OpenSSL socket BIO and its live send frames. Matching
+OpenSSL library hashes alone does not establish that object-to-socket path.
+Supporting curl needs a separately verified adapter/path; these tests do not
+relax the current checks or change routing to infer names from plaintext data.
+
+This adds eight TLS connections per mode/family: four successful fallback
+requests and four deliberate hostname/pin rejections. Both TLS versions pass
+through confined IPv4/IPv6 system-stack TUN and local auto-redirect. The base
+matrix still proves positive attribution on the supported controlled path.
+`curl-results.log` records version, library hashes, routes and request counts;
+`curl-stderr.log` retains the deliberate curl verification errors separately
+from the controlled client's empty stderr log. No key log or private keys are
+collected. Browser/NSS, ECH, curl HTTP/2/coalescing/retry policy and performance
+remain unproved.
