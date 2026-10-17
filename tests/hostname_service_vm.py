@@ -6,6 +6,7 @@ client.c. Refuses existing production paths. Uses a dedicated network namespace
 and removes only its own fixtures. Never run this on a deployed machine.
 """
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import re
@@ -29,6 +30,7 @@ RUN = None
 PACK = None
 FAMILY = 4
 AUTO_REDIRECT = False
+INTERRUPT_RECOVERY_POLL = False
 
 
 def call(*args, check=True, **kw):
@@ -64,6 +66,34 @@ def application_user():
     os.setgroups([])
     os.setgid(1000)
     os.setuid(1000)
+
+
+@contextmanager
+def interrupt_recovery_poll():
+    if not INTERRUPT_RECOVERY_POLL:
+        yield
+        return
+    pid = int(systemctl('show', '-p', 'MainPID', '--value', 'mihomo.service').stdout)
+    trace = RUN / 'recovery-poll.trace'
+    with (RUN / 'recovery-poll-tracer.log').open('w') as errors:
+        tracer = subprocess.Popen(['strace', '-f', '-p', str(pid), '-o', str(trace),
+            '-e', 'trace=ppoll', '-e', 'inject=ppoll:error=EINTR:when=1'],
+            stdout=subprocess.DEVNULL, stderr=errors)
+        try:
+            def attached():
+                if tracer.poll() is not None:
+                    raise AssertionError('strace exited; see recovery-poll-tracer.log')
+                tasks = list(Path(f'/proc/{pid}/task').iterdir())
+                return tasks and all(
+                    f'TracerPid:\t{tracer.pid}\n' in (task / 'status').read_text()
+                    for task in tasks)
+            wait(attached)
+            yield
+        finally:
+            if tracer.poll() is None:
+                tracer.send_signal(2)  # detach; leave the tracee running
+            tracer.wait(timeout=5)
+    assert 'INJECTED' in trace.read_text(), 'recovery poll was not interrupted'
 
 
 def wait_mihomo():
@@ -432,9 +462,16 @@ rules:
         oldpid = int(systemctl('show', '-p', 'MainPID', '--value', 'mihomo-hostname-observer.service').stdout)
         systemctl('kill', '--signal=SIGKILL', '--kill-whom=main', 'mihomo-hostname-observer.service')
         probe(False)
-        wait(lambda: systemctl('is-active', 'mihomo-hostname-observer.service', check=False).stdout.strip() == 'active')
-        assert oldpid != int(systemctl('show', '-p', 'MainPID', '--value', 'mihomo-hostname-observer.service').stdout)
-        probe(True)
+        def restarted():
+            # One state snapshot: separate is-active/MainPID queries can cross
+            # a transition, and MainPID=0 is not a recovered observer.
+            state = dict(line.split('=', 1) for line in systemctl('show', '-p',
+                'ActiveState,SubState,MainPID', 'mihomo-hostname-observer.service').stdout.splitlines())
+            return (state['ActiveState'] == 'active' and state['SubState'] == 'running'
+                    and int(state['MainPID']) not in (0, oldpid))
+        wait(restarted)
+        with interrupt_recovery_poll():
+            probe(True)
         tls_probe(True, 13)
         print('PASS SIGKILL cleanup, fallback and automatic fresh-instance recovery', flush=True)
         call('nft', '-a', 'list', 'table', 'inet', 'killswitch')
@@ -810,15 +847,17 @@ rules:
 
 
 def main():
-    global RUN, PACK, FAMILY, AUTO_REDIRECT
+    global RUN, PACK, FAMILY, AUTO_REDIRECT, INTERRUPT_RECOVERY_POLL
     parser = argparse.ArgumentParser()
     parser.add_argument('run', type=Path)
     parser.add_argument('--inside', action='store_true')
     parser.add_argument('--family', type=int, choices=(4, 6), default=4)
     parser.add_argument('--auto-redirect', action='store_true')
+    parser.add_argument('--interrupt-recovery-poll', action='store_true')
     args = parser.parse_args()
     FAMILY = args.family
     AUTO_REDIRECT = args.auto_redirect
+    INTERRUPT_RECOVERY_POLL = args.interrupt_recovery_poll
     RUN = args.run.resolve()
     PACK = RUN / 'packaging'
     assert os.geteuid() == 0
@@ -841,7 +880,7 @@ def main():
     guest_tcp_rmem = Path('/proc/sys/net/ipv4/tcp_rmem').read_text()
     call('ip', 'netns', 'add', NS)
     try:
-        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), *(['--auto-redirect'] if AUTO_REDIRECT else []), check=False)
+        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), *(['--auto-redirect'] if AUTO_REDIRECT else []), *(['--interrupt-recovery-poll'] if INTERRUPT_RECOVERY_POLL else []), check=False)
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
         assert result.returncode == 0, f'VM test failed ({result.returncode})'

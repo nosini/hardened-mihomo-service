@@ -155,8 +155,19 @@ lookups on the same live connection. No test connection is retried and no
 firewall exception bypasses the shipped kill switch. Failures retain socket
 and route state for diagnosis.
 
-One IPv6 loopback REDIRECT recovery run also selected ordinary fallback for the
-first expected named connection after automatic observer restart. Earlier and
-later recovery checks passed, but that failure is not explained by the TUN
-route trace. Observer recovery reliability remains a separate open issue;
-the fallback preserved the original destination and ClientHello.
+The optional `--interrupt-recovery-poll` flag requires `strace` in the disposable
+VM. After automatic observer restart is active/running with a new nonzero PID,
+it attaches only to the fixture Mihomo and injects `EINTR` into its first pidfd
+poll before the first named recovery connection. The tracer then detaches;
+`recovery-poll.trace` records the injection. Run this option with each family
+and interception mode. It changes no service unit, capability or SELinux policy.
+
+Previously a zero-timeout pidfd check treated `EINTR` as observer death and
+permanently revoked the reader. With this injection the old reader routes the
+first recovery connection through ordinary fallback; bounded interruption
+retries restore named routing. Actual exit and persistent errors still fail
+closed. Restart readiness uses one state snapshot and rejects PID zero.
+One earlier IPv6 loopback recovery failure had the same fallback symptom and
+preserved the destination and ClientHello, but its logs lack a syscall-level
+cause. The deterministic regression establishes a real cause of that symptom;
+it does not prove the earlier event's exact trigger retrospectively.
