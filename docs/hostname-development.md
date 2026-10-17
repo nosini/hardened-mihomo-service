@@ -265,11 +265,11 @@ fixture's whole-certificate pin.
 
 This is a verified unsupported application path, not successful hostname
 attribution. [curl 8.22.0's OpenSSL backend](https://github.com/curl/curl/blob/curl-8_22_0/lib/vtls/openssl.c)
-creates a custom BIO whose data points to curl's connection filter; the current
-observer verifies a raw OpenSSL socket BIO and its live send frames. Matching
+creates a custom BIO whose data points to curl's connection filter; the base
+profile verifies a raw OpenSSL socket BIO and its live send frames. Matching
 OpenSSL library hashes alone does not establish that object-to-socket path.
-Supporting curl needs a separately verified adapter/path; these tests do not
-relax the current checks or change routing to infer names from plaintext data.
+This group deliberately retains the base profile. The separate optional curl
+profile below verifies that additional path without relaxing base-profile checks.
 
 This adds eight TLS connections per mode/family: four successful fallback
 requests and four deliberate hostname/pin rejections. Both TLS versions pass
@@ -280,3 +280,28 @@ matrix still proves positive attribution on the supported controlled path.
 from the controlled client's empty stderr log. No key log or private keys are
 collected. Browser/NSS, ECH, curl HTTP/2/coalescing/retry policy and performance
 remain unproved.
+
+
+## Optional verified curl adapter
+
+Add `--curl-adapter` to exercise the separately selected
+`openssl-3.5.3-curl-8.22.0-x86-64-v3` observer profile. It requires an additional
+exact mapped libcurl file/hash and verifies the live SSL/BIO/filter/socket chain.
+No service unit, capability, SELinux policy or Mihomo behavior change is needed.
+Use both `--curl-compat --curl-adapter` to test the original fallback boundary
+and the new opt-in behavior in one full matrix.
+
+For both TLS versions, `route.invalid` selects NAMED and `reuse.invalid` selects
+RENAMED while the destination remains the original test IP/port. Assertions use
+the Domain rule and rule payload; real-IP API host metadata intentionally remains
+empty. Wrong-host and SPKI-pin failures still deliver zero HTTP request bytes.
+An additional case stops the observer before curl transfer and completes verified
+HTTPS through ordinary DIRECT fallback. A test-only constructor additionally
+creates and joins a thread before curl reads config, verifying libc's cancellable syscall path without interposing any socket
+or TLS calls. The other cases use curl without that constructor. Per mode/family
+this adds twelve TLS connections, eight successful requests and four deliberate
+verification rejections.
+Results and expected curl errors are in `curl-adapter-results.log` and
+`curl-adapter-stderr.log`. Supported scope is this exact direct-TCP HTTP/1.1 curl
+build; its HTTP/2/coalescing/retry policy, proxy layers, ECH and other builds remain
+unproved. See [the adapter boundary](https://github.com/nosini/socketowner/blob/ebpf-hostname-discovery/experiments/hostname/CURL.md).

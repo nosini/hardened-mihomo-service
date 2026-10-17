@@ -35,6 +35,7 @@ FAMILY = 4
 AUTO_REDIRECT = False
 INTERRUPT_RECOVERY_POLL = False
 CURL_COMPAT = False
+CURL_ADAPTER = False
 
 
 def call(*args, check=True, **kw):
@@ -848,12 +849,12 @@ rules:
         assert systemctl('start', 'mihomo-hostname-observer.service', check=False).returncode != 0
         assert systemctl('is-active', 'mihomo.service').stdout.strip() == 'active'
         print('PASS target exit revokes and stale restart refuses', flush=True)
-        if CURL_COMPAT:
+        for adapter in ([False] if CURL_COMPAT else []) + ([True] if CURL_ADAPTER else []):
             assert tun_server is not None, 'curl compatibility requires the configured remote TLS peer'
             run_curl_matrix(call=call, api=api, wait=wait, systemctl=systemctl,
                 application_user=application_user, listener=tun_server, run=RUN,
                 prepare=prepare, cgroup=cgroup, family=FAMILY, inbound=inbound,
-                redirect_port=auto_redirect_port if AUTO_REDIRECT else None)
+                redirect_port=auto_redirect_port if AUTO_REDIRECT else None, adapter=adapter)
     finally:
         for unit in ('mihomo-hostname-observer.service', 'mihomo.service', 'killswitch.service'):
             (RUN / (unit + '.journal')).write_text(call('journalctl', '-u', unit, '--no-pager', '-n', '160', check=False).stdout)
@@ -894,7 +895,7 @@ rules:
 
 
 def main():
-    global RUN, PACK, FAMILY, AUTO_REDIRECT, INTERRUPT_RECOVERY_POLL, CURL_COMPAT
+    global RUN, PACK, FAMILY, AUTO_REDIRECT, INTERRUPT_RECOVERY_POLL, CURL_COMPAT, CURL_ADAPTER
     parser = argparse.ArgumentParser()
     parser.add_argument('run', type=Path)
     parser.add_argument('--inside', action='store_true')
@@ -902,11 +903,13 @@ def main():
     parser.add_argument('--auto-redirect', action='store_true')
     parser.add_argument('--interrupt-recovery-poll', action='store_true')
     parser.add_argument('--curl-compat', action='store_true')
+    parser.add_argument('--curl-adapter', action='store_true')
     args = parser.parse_args()
     FAMILY = args.family
     AUTO_REDIRECT = args.auto_redirect
     INTERRUPT_RECOVERY_POLL = args.interrupt_recovery_poll
     CURL_COMPAT = args.curl_compat
+    CURL_ADAPTER = args.curl_adapter
     RUN = args.run.resolve()
     PACK = RUN / 'packaging'
     assert os.geteuid() == 0
@@ -929,7 +932,7 @@ def main():
     guest_tcp_rmem = Path('/proc/sys/net/ipv4/tcp_rmem').read_text()
     call('ip', 'netns', 'add', NS)
     try:
-        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), *(['--auto-redirect'] if AUTO_REDIRECT else []), *(['--interrupt-recovery-poll'] if INTERRUPT_RECOVERY_POLL else []), *(['--curl-compat'] if CURL_COMPAT else []), check=False)
+        result = call('nsenter', '--net=/run/netns/' + NS, sys.executable, str(Path(__file__).resolve()), str(RUN), '--inside', '--family', str(FAMILY), *(['--auto-redirect'] if AUTO_REDIRECT else []), *(['--interrupt-recovery-poll'] if INTERRUPT_RECOVERY_POLL else []), *(['--curl-compat'] if CURL_COMPAT else []), *(['--curl-adapter'] if CURL_ADAPTER else []), check=False)
         print(result.stdout, end='')
         print(result.stderr, end='', file=sys.stderr)
         assert result.returncode == 0, f'VM test failed ({result.returncode})'

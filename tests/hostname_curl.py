@@ -9,7 +9,7 @@ import subprocess
 
 
 def run_curl_matrix(*, call, api, wait, systemctl, application_user, listener,
-                    run, prepare, cgroup, family, inbound, redirect_port=None):
+                    run, prepare, cgroup, family, inbound, redirect_port=None, adapter=False):
     version_info = call('curl', '-q', '--version').stdout
     assert 'libcurl/8.22.0 OpenSSL/3.5.3' in version_info, version_info
     public_key = call('openssl', 'x509', '-in', str(run / 'peer.pem'), '-pubkey', '-noout').stdout
@@ -17,19 +17,29 @@ def run_curl_matrix(*, call, api, wait, systemctl, application_user, listener,
                          input=public_key.encode(), capture_output=True, check=True).stdout
     good_pin = 'sha256//' + base64.b64encode(hashlib.sha256(der).digest()).decode()
     bad_pin = 'sha256//' + base64.b64encode(bytes(32)).decode()
+    threaded_library = run / 'curl-thread.so'
+    if adapter:
+        call('gcc', '-shared', '-fPIC', '-O2', '-Wall', '-Wextra', '-Werror', '-pthread',
+             str(run / 'packaging/tests/hostname_curl_thread.c'), '-o', str(threaded_library))
     results = []
     errors = []
     try:
         for version in ('1.2', '1.3'):
             for case, host, expected_exit in (
                     ('named', 'route.invalid', 0), ('renamed', 'reuse.invalid', 0),
-                    ('wrong-host', 'wrong.invalid', 60), ('wrong-pin', 'route.invalid', 90)):
+                    ('wrong-host', 'wrong.invalid', 60), ('wrong-pin', 'route.invalid', 90),
+                    *((('observer-stopped', 'route.invalid', 0), ('threaded', 'route.invalid', 0)) if adapter else ())):
                 assert not api('/connections')['connections']
+                environment = {key: value for key, value in os.environ.items()
+                               if key not in ('SSLKEYLOGFILE', 'CURL_SSL_BACKEND', 'LD_PRELOAD')}
+                if case == 'threaded':
+                    # Constructor creates and joins one thread before curl reads
+                    # config. It does not interpose any socket or TLS function.
+                    environment['LD_PRELOAD'] = str(threaded_library)
                 proc = subprocess.Popen(['curl', '-q', '--config', '-'],
                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                     text=True, preexec_fn=application_user,
-                    env={key: value for key, value in os.environ.items()
-                         if key not in ('SSLKEYLOGFILE', 'CURL_SSL_BACKEND')})
+                    env=environment)
                 accepted = None
                 record = {'tls': version, 'case': case, 'hostname': host}
                 results.append(record)
@@ -54,6 +64,9 @@ def run_curl_matrix(*, call, api, wait, systemctl, application_user, listener,
                     (cgroup / 'cgroup.procs').write_text(str(proc.pid))
                     registration = list(prepare)
                     registration[registration.index('-target-pid') + 1] = str(proc.pid)
+                    if adapter:
+                        registration[registration.index('-profile') + 1] = 'openssl-3.5.3-curl-8.22.0-x86-64-v3'
+                        registration[-1:-1] = ['-libcurl', str(Path('/usr/lib64/libcurl.so.4').resolve())]
                     call(*registration)
                     systemctl('reset-failed', 'mihomo-hostname-observer.service')
                     systemctl('start', 'mihomo-hostname-observer.service')
@@ -61,6 +74,8 @@ def run_curl_matrix(*, call, api, wait, systemctl, application_user, listener,
                     observer_pid = int(systemctl('show', '-p', 'MainPID', '--value',
                                                  'mihomo-hostname-observer.service').stdout)
                     assert 'mihomo_hostname_t' in Path(f'/proc/{observer_pid}/attr/current').read_text()
+                    if case == 'observer-stopped':
+                        systemctl('stop', 'mihomo-hostname-observer.service')
                     target, port = listener.getsockname()[:2]
                     address = f'[{target}]' if family == 6 else target
                     config = '\n'.join((
@@ -82,8 +97,15 @@ def run_curl_matrix(*, call, api, wait, systemctl, application_user, listener,
                         and entry['metadata']['destinationPort'] == str(port)), None))
                     metadata = connection['metadata']
                     assert metadata['type'] == inbound, connection
+                    attributed = adapter and case != 'observer-stopped'
+                    chain = {'route.invalid': 'NAMED', 'reuse.invalid': 'RENAMED'}.get(host, 'DIRECT') if attributed else 'DIRECT'
+                    # Application evidence is used for matching while the real-IP
+                    # metadata remains intact; the API host stays empty.
                     assert not metadata.get('host'), connection
-                    assert connection['chains'] == ['DIRECT'], connection
+                    expected_chains = ['DIRECT'] if chain == 'DIRECT' else ['DIRECT', chain]
+                    assert connection['chains'] == expected_chains, connection
+                    if chain != 'DIRECT':
+                        assert connection['rule'] == 'Domain' and connection['rulePayload'] == host, connection
                     if redirect_port is not None:
                         assert int(metadata['inboundPort']) == redirect_port, connection
                     record['connection'] = connection
@@ -140,7 +162,8 @@ def run_curl_matrix(*, call, api, wait, systemctl, application_user, listener,
                     systemctl('stop', 'mihomo-hostname-observer.service', check=False)
                     systemctl('reset-failed', 'mihomo-hostname-observer.service')
                     wait(lambda: not api('/connections')['connections'])
-            print(f'PASS IPv{family} TLSv{version} {inbound} real curl custom-BIO remains unattributed; fallback, hostname and pin verification (4 connections)', flush=True)
+            label = 'verified curl adapter routes, verification and observer-stop/threaded sends (6 connections)' if adapter else 'real curl custom-BIO remains unattributed; fallback, hostname and pin verification (4 connections)'
+            print(f'PASS IPv{family} TLSv{version} {inbound} {label}', flush=True)
     finally:
-        (run / 'curl-results.log').write_text(json.dumps({'curl_version': version_info, 'cases': results}, indent=2) + '\n')
-        (run / 'curl-stderr.log').write_text(json.dumps(errors, indent=2) + '\n')
+        (run / ('curl-adapter-results.log' if adapter else 'curl-results.log')).write_text(json.dumps({'curl_version': version_info, 'cases': results}, indent=2) + '\n')
+        (run / ('curl-adapter-stderr.log' if adapter else 'curl-stderr.log')).write_text(json.dumps(errors, indent=2) + '\n')
