@@ -72,10 +72,10 @@ The full-TLS matrix also fixes TLS 1.2/1.3, verifies the peer certificate and
 hostname with a client-only test trust store, checks a SHA-256 certificate pin,
 and exchanges known application bytes in both directions. Untrusted certificates,
 wrong hostnames and wrong pins must fail without delivering application data.
-In the default TUN mode, each family runs forty-one TLS connections:
-thirty-three successful exchanges
+In the default TUN mode, each family runs forty-six TLS connections:
+thirty-seven successful exchanges
 (including large ClientHellos, actual short-write retries, observer stop/restart,
-recovery after SIGKILL, feature disablement, TUN and session resumption) and eight
+recovery after SIGKILL, feature disablement, TUN and session resumption) and nine
 intentional rejections. Both TLS versions exercise a ClientHello above 4 KiB and
 a pending write that starts with
 `SSL_ERROR_WANT_WRITE`, then completes through the real redirect listener. After
@@ -83,6 +83,23 @@ the handshake and application exchange, the same connection ID and chain must
 remain live despite unsupported later sends revoking initial-window discovery
 authority. The peer checks the unchanged SNI, and the API confirms the
 original destination IP/port.
+
+The TLS 1.3 HelloRetryRequest group adds five connections per family/mode.
+The client supports X25519 and P-256, initially sharing X25519; a P-256-only
+server forces a key-share retry. Reversed client preference is a no-retry
+control. OpenSSL's message callback counts sent ClientHellos and identifies
+received HRR by the fixed ServerHello Random in
+[RFC 8446 section 4.1.3](https://www.rfc-editor.org/rfc/rfc8446.html#section-4.1.3).
+Before the peer starts TLS, each case must have exactly one ClientHello and no
+HRR; completion requires two ClientHellos/one HRR, or one/zero for the control.
+The server sees the same SNI on both ClientHellos. Repeated application exchanges
+preserve the connection ID, selected chain and original destination, including
+observer stop after initial route commitment and new-socket fallback while it
+is stopped. A wrong pin after HRR still delivers no application request.
+Certificate and hostname verification stay enabled. These are full handshakes,
+not ticket resumption, and use no added adapter/profile/runtime permissions.
+Cookie-only HRR, malformed retry flights and other TLS implementations remain
+unproved.
 
 The TUN resumption group adds eleven connections per TLS version. A persistent
 server context accepts saved tickets on new SSL objects and on the same object
@@ -105,8 +122,8 @@ can drop relay packets despite an advertised window because skb overhead also
 counts against receive memory; it is not a suitable baseline for session tests.
 Unexpected session exchange failures save both namespaces’ socket states.
 
-With `--auto-redirect`, each family runs forty-nine TLS connections:
-thirty-five successful exchanges and fourteen deliberate rejections. Eight
+With `--auto-redirect`, each family runs fifty-four TLS connections:
+thirty-nine successful exchanges and fifteen deliberate rejections. Eight
 additional connections check both TLS versions' certificate, hostname and pin
 behavior through the actual redirect listener; the loopback groups stay intact.
 The remote-server and resumption groups enable
@@ -133,7 +150,7 @@ in that rejection case, which must still deliver no application request. Certifi
 keys remain in the task run directory for its owner to remove after collecting
 logs; no test trust enters the system store. The harness collects service
 journals and client stderr before removing its own installations and policy.
-Browser encrypted DNS/ECH, early data, HelloRetryRequest, cross-origin reuse,
+Browser encrypted DNS/ECH, early data, cross-origin reuse,
 performance and broader applications remain unproved. Resumption coverage is
 limited to TLS tickets and the controlled OpenSSL socket-BIO fixture.
 

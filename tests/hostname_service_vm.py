@@ -606,7 +606,7 @@ rules:
 
         def session_probe(context, version, *, previous=None, resume=False,
                           resumed=False, name='route.invalid', chain='NAMED',
-                          rounds=1, pin_failure=False):
+                          rounds=1, pin_failure=False, groups=None, hrr=False, stop_after_route=False):
             # The server context persists between connections, including its
             # ticket keys. Each invocation still gets a new TCP lifetime.
             if previous is None:
@@ -623,7 +623,11 @@ rules:
             assert command(f'verify {slot} {RUN / "peer.pem"} {hostname} {expected_pin} {version}') == 'ok'
             if resume:
                 assert command(f'resume {slot}') == 'ok'
+            if groups:
+                assert command(f'groups {slot} {groups}') == 'ok'
             assert command(f'handshake {slot}') == f'handshake {slot} -1 2'
+            if groups:
+                assert command(f'hello-state {slot}') == f'hello-state {slot} client-hellos 1 hello-retries 0'
             accepted, _ = tun_server.accept()
             accepted.settimeout(5)
             connection = wait(lambda: next(iter(api('/connections')['connections'] or []), None))
@@ -634,6 +638,10 @@ rules:
             assert connection['metadata']['destinationPort'] == str(tun_server.getsockname()[1]), connection
             selected = next((item for item in connection['chains'] if item in ('NAMED', 'RENAMED')), 'DIRECT')
             assert selected == chain, connection
+            # This route is committed before the server sends any HRR. Losing
+            # discovery authority cannot change the relay already selected.
+            if stop_after_route:
+                systemctl('stop', 'mihomo-hostname-observer.service')
             result = {'names': [], 'requests': [], 'error': None}
             context.set_servername_callback(lambda _sock, value, _ctx: result['names'].append(value))
 
@@ -684,6 +692,10 @@ rules:
                     live = api('/connections')['connections']
                     assert len(live) == 1 and live[0]['id'] == connection['id'], live
                     assert live[0]['chains'] == connection['chains'], live
+                if groups:
+                    state = command(f'hello-state {slot}')
+                    expected_hellos = 2 if hrr else 1
+                    assert state == f'hello-state {slot} client-hellos {expected_hellos} hello-retries {int(hrr)}', state
                 state = command(f'session-state {slot}')
                 assert state.startswith(f'session {slot} reused {int(resumed)} resumable '), state
                 shutdown_reply = command(f'shutdown {slot}')
@@ -693,7 +705,7 @@ rules:
                 assert result['error'] is None, result
                 assert result['resumed'] == resumed, result
                 assert result['version'] == f'TLSv1.{version - 10}', result
-                assert result['names'] == [None if name == '-' else name], result
+                assert result['names'] == [None if name == '-' else name] * (2 if hrr else 1), result
                 assert len(result['requests']) == (0 if pin_failure else rounds), result
                 if not pin_failure:
                     assert command(f'save-session {slot}') == 'ok'
@@ -701,7 +713,7 @@ rules:
                 complete = True
                 print(f'  TLSv1.{version - 10} name={name} chain={chain} offered={resume} '
                       f'resumed={resumed} same_ssl={previous is not None} rounds={rounds} '
-                      f'pin_rejected={pin_failure}', flush=True)
+                      f'pin_rejected={pin_failure} hrr={hrr} groups={groups}', flush=True)
                 return fields
             finally:
                 if not complete and client.poll() is None:
@@ -738,6 +750,27 @@ rules:
             current = session_probe(context, version, previous=current, resume=True, resumed=True, pin_failure=True)
             assert command(f'close {current[1]}') == 'ok'
             print(f'PASS IPv{FAMILY} TLSv1.{version - 10} {"auto-redirect" if AUTO_REDIRECT else "TUN"} session resumption, SSL reuse and fallback', flush=True)
+
+        # Advertise P-256 but initially share only X25519. The server's
+        # P-256-only policy forces HRR; reversing client preference is the
+        # negative control. Message counters prove the actual flight counts.
+        def hrr_probe(*, retry=True, chain='NAMED', stop_after_route=False, pin_failure=False):
+            context = session_context(13)
+            context.set_ecdh_curve('prime256v1')
+            fields = session_probe(context, 13,
+                groups='X25519:P-256' if retry else 'P-256:X25519', hrr=retry,
+                chain=chain, stop_after_route=stop_after_route,
+                rounds=3, pin_failure=pin_failure)
+            assert command(f'close {fields[1]}') == 'ok'
+
+        hrr_probe(retry=False)
+        hrr_probe()
+        hrr_probe(stop_after_route=True)
+        hrr_probe(chain='DIRECT')
+        systemctl('reset-failed', 'mihomo-hostname-observer.service')
+        systemctl('start', 'mihomo-hostname-observer.service')
+        hrr_probe(pin_failure=True)
+        print(f'PASS IPv{FAMILY} TLSv1.3 {"auto-redirect" if AUTO_REDIRECT else "TUN"} HelloRetryRequest and stable routes', flush=True)
 
         if AUTO_REDIRECT:
             # Two original destinations collapse onto the same redirect
